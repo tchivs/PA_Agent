@@ -86,7 +86,7 @@ def test_no_order_shows_no_trade_conclusion(qtbot, tmp_path):
     qtbot.addWidget(window)
     window.show()
 
-    window._bar_count_spin.setValue(5)
+    window._ctx.settings.general.analysis_bar_count = 5
     window._on_submit_analysis()
 
     # Poll until the analysis is no longer in progress

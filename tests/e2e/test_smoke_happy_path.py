@@ -89,7 +89,7 @@ def test_happy_path_shows_trading_decision(qtbot, tmp_path):
     window.show()
 
     # Set bar count to 5 so take_snapshot succeeds with our 10-bar buffer
-    window._bar_count_spin.setValue(5)
+    window._ctx.settings.general.analysis_bar_count = 5
 
     # Trigger analysis
     window._on_submit_analysis()

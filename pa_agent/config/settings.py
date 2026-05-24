@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
+DataSourceKind = Literal["mt5", "tradingview"]
 
 
 class AIProviderSettings(BaseModel):
@@ -24,9 +25,12 @@ class GeneralSettings(BaseModel):
     """UI and data-feed general settings."""
     model_config = ConfigDict(extra="ignore")
 
-    default_bar_count: int = 100
+    analysis_bar_count: int = Field(default=100, ge=2, le=5000)
     refresh_interval_ms: int = 1000
     context_warning_threshold_pct: float = 80.0
+    last_data_source: DataSourceKind = "mt5"
+    #: TradingView 现货黄金默认 OANDA:XAUUSD（连续外汇金价，少跳空）
+    last_tradingview_exchange: str = "OANDA"
     last_symbol: str = "XAUUSDm"
     last_timeframe: str = "15m"
     decision_flow_auto_play: bool = True
@@ -40,6 +44,15 @@ class GeneralSettings(BaseModel):
     stream_pane_font_pt: int = Field(default=11, ge=8, le=28)
     #: K 线图上 #序号 标签的字号（pt）
     chart_seq_label_font_pt: int = Field(default=7, ge=6, le=24)
+    #: 两阶段分析结束后是否自动恢复 K 线图表实时刷新
+    auto_resume_chart_after_analysis: bool = True
+
+    @field_validator("last_data_source", mode="before")
+    @classmethod
+    def _coerce_legacy_data_source(cls, v: object) -> object:
+        if v == "yfinance":
+            return "mt5"
+        return v
 
     @field_validator("decision_flow_default_zoom_pct", mode="before")
     @classmethod
@@ -99,6 +112,11 @@ def load_settings(path: Path | None = None) -> "Settings":
     if "cost_warning_threshold_pct" in general and "context_warning_threshold_pct" not in general:
         general["context_warning_threshold_pct"] = general.pop("cost_warning_threshold_pct")
     general.pop("last_htf_text", None)
+    from pa_agent.data.market_defaults import migrate_general_gold_defaults
+
+    migrate_general_gold_defaults(general)
+    if "default_bar_count" in general and "analysis_bar_count" not in general:
+        general["analysis_bar_count"] = general.pop("default_bar_count")
     raw["general"] = general
     provider = raw.get("provider", {})
     provider.pop("pricing", None)

@@ -521,6 +521,7 @@ class TwoStageOrchestrator:
 
             stage2_json = build_stage2_gate_wait_response(stage1_json)
             on_event(OrchestratorEvent.Stage2Done)
+            logger.info("next_bar_prediction direction=null probs=null/null/null unpredictable=true (gate short-circuit)")
             usage_total = _accumulate_usage(record.usage_total, reply_s1.usage)
             record = record.model_copy(
                 update={
@@ -552,6 +553,7 @@ class TwoStageOrchestrator:
             strategy_files=strategy_files,
             experience_entries=experience_entries,
             decision_stance=record.meta.decision_stance,
+            previous_record=previous_record,
         )
 
         # ── Step 15: Call AI for Stage 2 ──────────────────────────────────────
@@ -717,6 +719,24 @@ class TwoStageOrchestrator:
 
         # ── Step 19: Stage 2 done ─────────────────────────────────────────────
         on_event(OrchestratorEvent.Stage2Done)
+
+        # ── Step 19.5: Log next_bar_prediction (R9.3, NFR2.1) ───────────────────
+        _pred = stage2_json if isinstance(stage2_json, dict) else {}
+        _nb_pred = _pred.get("next_bar_prediction")
+        if isinstance(_nb_pred, dict):
+            if _nb_pred.get("unpredictable"):
+                logger.info("next_bar_prediction direction=null probs=null/null/null unpredictable=true")
+            else:
+                _probs = _nb_pred.get("probabilities") or {}
+                logger.info(
+                    "next_bar_prediction direction=%s probs=%s/%s/%s unpredictable=false",
+                    _nb_pred.get("direction"),
+                    _probs.get("bullish"),
+                    _probs.get("bearish"),
+                    _probs.get("neutral"),
+                )
+        else:
+            logger.info("next_bar_prediction absent from stage2 response")
 
         # ── Step 20: Build final record ───────────────────────────────────────
         usage_total = _accumulate_usage(

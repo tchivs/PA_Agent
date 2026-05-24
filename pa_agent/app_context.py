@@ -40,8 +40,8 @@ class AppContext:
         from pa_agent.util.logging import configure_logging, update_api_key
         from pa_agent.util.event_bus import EventBus
         from pa_agent.security.secret_store import mask_secret
+        from pa_agent.data.factory import create_data_source, normalize_data_source_kind
         from pa_agent.data.kline_buffer import KlineBuffer
-        from pa_agent.data.mt5 import MT5Source
         from pa_agent.ai.deepseek_client import DeepSeekClient
         from pa_agent.ai.prompt_assembler import PromptAssembler
         from pa_agent.ai.router import route_strategy_files
@@ -63,17 +63,28 @@ class AppContext:
 
         # ── Data layer ────────────────────────────────────────────────────────
         buffer = KlineBuffer(capacity=1000)
-        data_source = MT5Source()
+        ds_kind = normalize_data_source_kind(
+            getattr(settings.general, "last_data_source", "mt5")
+        )
+        data_source = create_data_source(ds_kind)
 
         # Subscribe to the last-used symbol/timeframe from settings
         try:
             data_source.connect()
+            if ds_kind == "tradingview":
+                from pa_agent.data.tradingview import TradingViewSource
+
+                if isinstance(data_source, TradingViewSource):
+                    data_source.set_exchange(
+                        getattr(settings.general, "last_tradingview_exchange", "") or ""
+                    )
             data_source.subscribe(
                 settings.general.last_symbol,
                 settings.general.last_timeframe,
             )
             app_logger.info(
-                "Subscribed to %s %s",
+                "Data source %s subscribed to %s %s",
+                ds_kind,
                 settings.general.last_symbol,
                 settings.general.last_timeframe,
             )

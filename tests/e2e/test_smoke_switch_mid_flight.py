@@ -107,7 +107,7 @@ def test_switch_mid_flight_cancels_worker(qtbot, tmp_path):
     qtbot.addWidget(window)
     window.show()
 
-    window._bar_count_spin.setValue(5)
+    window._ctx.settings.general.analysis_bar_count = 5
 
     # Start analysis
     window._on_submit_analysis()

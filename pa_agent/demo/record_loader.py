@@ -33,6 +33,9 @@ def pick_random_record_path(directory: Path | None = None) -> Path | None:
 def load_analysis_record(path: Path) -> AnalysisRecord:
     """Parse one pending record file."""
     raw = json.loads(path.read_text(encoding="utf-8"))
+    # Strip debug-only fields injected by PendingWriter.save_partial()
+    # that are deliberately kept out of the Pydantic model.
+    raw.pop("_partial_reason", None)
     return AnalysisRecord.model_validate(raw)
 
 

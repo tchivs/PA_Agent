@@ -26,9 +26,12 @@
 | `provider.thinking` | 是否启用思考/推理类扩展参数（依模型与网关而定） |
 | `provider.reasoning_effort` | `low` / `medium` / `high` / `max` |
 | `provider.context_window` | 用于上下文占用提示的窗口大小（tokens） |
+| `general.last_data_source` | K 线数据来源：`mt5` / `tradingview` |
+| `general.last_tradingview_exchange` | TradingView 现货黄金默认 `OANDA`（品种 `XAUUSD`） |
 | `general.last_symbol` | 默认品种，须与 MT5「市场报价」名称一致（含 `m` 等后缀） |
 | `general.last_timeframe` | 默认周期，如 `5m`、`15m`、`1h` |
 | `general.decision_stance` | 阶段二倾向：`conservative` / `balanced` / `aggressive` / `extreme_aggressive` |
+| `general.auto_resume_chart_after_analysis` | 分析结束后是否自动恢复「图表实时更新」（默认 `true`） |
 
 ## 安全提醒
 

@@ -24,6 +24,16 @@ from PyQt6.QtWidgets import (
 
 _NO_ORDER = "不下单"
 
+# Reasoning text — larger than default mutedLabel (11px)
+_REASON_FONT_CSS = "font-size: 14px; color: #c9d1d9; line-height: 1.45;"
+_REASON_EDIT_CSS = (
+    "font-size: 14px; color: #e6edf3; line-height: 1.45;"
+    "font-family: 'Microsoft YaHei UI', 'Segoe UI', sans-serif;"
+)
+
+_PREDICTION_UNPREDICTABLE_COLOR = "#8b949e"
+_PREDICTION_UNPREDICTABLE_LABEL = "不可预测"
+
 # Brooks cycle_position → 中文（市场周期 / 频谱位置）
 _CYCLE_POSITION_ZH: dict[str, str] = {
     "spike": "尖峰 (Spike)",
@@ -43,6 +53,12 @@ _RANGE_CYCLES = frozenset({"trading_range", "extreme_tr", "trending_tr"})
 _MARKET_PHASE_ZH: dict[str, str] = {
     "stable": "稳定",
     "transitioning": "过渡",
+}
+
+_PREDICTION_DOMINANT_COLOR: dict[str, str] = {
+    "bullish": "#3fb950",
+    "bearish": "#f85149",
+    "neutral": "#e6b800",
 }
 
 
@@ -71,7 +87,6 @@ def _infer_trend_label(direction: str, cycle_position: str) -> str:
     if d == "neutral":
         return "震荡"
 
-    # 通道类但未给方向时，根据周期名粗略判断
     if cp in ("spike", "micro_channel", "tight_channel"):
         return "趋势运行中"
     return "—"
@@ -107,12 +122,35 @@ def _parse_score_100(value: object) -> int | None:
         return None
 
 
+def _format_prediction_probs_line(probs: dict) -> str:
+    bull = probs.get("bullish", "?")
+    bear = probs.get("bearish", "?")
+    neut = probs.get("neutral", "?")
+    return f"阳 {bull}%  ·  阴 {bear}%  ·  中 {neut}%"
+
+
+def _dominant_prediction_direction(probs: dict) -> str | None:
+    """Return bullish/bearish/neutral for styling by highest probability."""
+    parsed: list[tuple[str, float]] = []
+    for key in ("bullish", "bearish", "neutral"):
+        raw = probs.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            parsed.append((key, float(raw)))
+        except (TypeError, ValueError):
+            continue
+    if not parsed:
+        return None
+    return max(parsed, key=lambda item: item[1])[0]
+
+
 class DecisionPanel(QWidget):
     """Renders market diagnosis + Stage-2 trading decision.
 
     Confidence layout (two bars):
       市场诊断区 → 市场判断置信度 (Stage 2 diagnosis_confidence)
-      交易决策区 → 交易决策置信度 (Stage 2 trade_confidence)
+      交易决策区 → 交易决策置信度 (Stage 2 trade_confidence, inline on summary row)
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -138,22 +176,23 @@ class DecisionPanel(QWidget):
         diag_title.setStyleSheet("font-weight: bold; color: #58a6ff;")
         layout.addWidget(diag_title)
 
-        self._trend_label = QLabel("趋势判断：—")
-        self._trend_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._trend_label.setStyleSheet(
-            "font-size: 20px; font-weight: bold; padding: 10px;"
-            "background-color: #21262d; border-radius: 8px; color: #8b949e;"
-        )
-        layout.addWidget(self._trend_label)
+        diag_row = QWidget()
+        diag_row_layout = QHBoxLayout(diag_row)
+        diag_row_layout.setContentsMargins(0, 0, 0, 0)
+        diag_row_layout.setSpacing(8)
 
-        self._cycle_label = QLabel("市场周期：—")
-        self._cycle_label.setWordWrap(True)
-        self._cycle_label.setObjectName("mutedLabel")
-        layout.addWidget(self._cycle_label)
-
-        self._phase_label = QLabel("市场阶段：—")
-        self._phase_label.setObjectName("mutedLabel")
-        layout.addWidget(self._phase_label)
+        self._trend_label = QLabel("趋势：—")
+        self._cycle_label = QLabel("周期：—")
+        self._phase_label = QLabel("阶段：—")
+        for lbl in (self._trend_label, self._cycle_label, self._phase_label):
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setWordWrap(True)
+            lbl.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Preferred,
+            )
+            diag_row_layout.addWidget(lbl, stretch=1)
+        layout.addWidget(diag_row)
 
         # ── 市场判断置信度（来自 Stage 2 diagnosis_confidence）───────────
         self._diag_conf_title = QLabel("市场判断置信度")
@@ -172,7 +211,7 @@ class DecisionPanel(QWidget):
 
         self._diag_reasoning_label = QLabel()
         self._diag_reasoning_label.setWordWrap(True)
-        self._diag_reasoning_label.setObjectName("mutedLabel")
+        self._diag_reasoning_label.setStyleSheet(_REASON_FONT_CSS)
         layout.addWidget(self._diag_reasoning_label)
 
         sep2 = QFrame()
@@ -199,10 +238,6 @@ class DecisionPanel(QWidget):
             "font-size: 13px; font-weight: bold; color: #58a6ff;"
         )
 
-        self._conclusion_label = QLabel("—")
-        self._conclusion_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._conclusion_label.setStyleSheet("font-size: 18px; font-weight: bold;")
-
         self._win_rate_inline_label = QLabel("—")
         self._win_rate_inline_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -212,67 +247,125 @@ class DecisionPanel(QWidget):
         )
 
         bar_layout.addWidget(self._rr_inline_label, stretch=1)
-        bar_layout.addWidget(self._conclusion_label, stretch=2)
         bar_layout.addWidget(self._win_rate_inline_label, stretch=1)
         layout.addWidget(self._conclusion_bar)
 
-        self._details_widget = QWidget()
-        details_layout = QVBoxLayout(self._details_widget)
-        details_layout.setContentsMargins(0, 0, 0, 0)
-        details_layout.setSpacing(6)
+        self._trade_summary_row = QWidget()
+        trade_summary_layout = QHBoxLayout(self._trade_summary_row)
+        trade_summary_layout.setContentsMargins(0, 4, 0, 0)
+        trade_summary_layout.setSpacing(12)
 
-        self._direction_label = QLabel()
-        self._order_type_label = QLabel()
-        self._entry_label = QLabel()
-        self._tp_label = QLabel()
-        self._sl_label = QLabel()
+        self._conclusion_label = QLabel("—")
+        self._conclusion_label.setStyleSheet(
+            "font-size: 18px; font-weight: bold; color: #8b949e;"
+        )
 
-        for lbl in (
-            self._direction_label,
-            self._order_type_label,
-            self._entry_label,
-            self._tp_label,
-            self._sl_label,
-        ):
-            lbl.setWordWrap(True)
-            lbl.setObjectName("mutedLabel")
-            details_layout.addWidget(lbl)
+        self._direction_inline_label = QLabel()
+        self._direction_inline_label.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #8b949e;"
+        )
 
-        layout.addWidget(self._details_widget)
+        self._trade_conf_inline_label = QLabel()
+        self._trade_conf_inline_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
 
-        # ── 交易决策置信度（来自 Stage 2 trade_confidence）────────────────
+        trade_summary_layout.addWidget(self._conclusion_label)
+        trade_summary_layout.addWidget(self._direction_inline_label)
+        trade_summary_layout.addStretch(1)
+        trade_summary_layout.addWidget(self._trade_conf_inline_label)
+        layout.addWidget(self._trade_summary_row)
+
+        self._trade_prices_row = QWidget()
+        prices_layout = QHBoxLayout(self._trade_prices_row)
+        prices_layout.setContentsMargins(0, 0, 0, 0)
+        prices_layout.setSpacing(16)
+
+        self._entry_label = QLabel("入场  —")
+        self._tp_label = QLabel("止盈  —")
+        self._sl_label = QLabel("止损  —")
+        for lbl in (self._entry_label, self._tp_label, self._sl_label):
+            lbl.setStyleSheet("font-size: 14px; color: #c9d1d9;")
+            prices_layout.addWidget(lbl, stretch=1)
+
+        layout.addWidget(self._trade_prices_row)
+
         self._trade_conf_title = QLabel("交易决策置信度")
         self._trade_conf_title.setStyleSheet("font-weight: bold; margin-top: 4px;")
-        layout.addWidget(self._trade_conf_title)
+        self._trade_conf_title.setVisible(False)
 
         self._trade_conf_bar = QProgressBar()
         self._trade_conf_bar.setRange(0, 100)
         self._trade_conf_bar.setTextVisible(True)
         self._trade_conf_bar.setFormat("%v / 100")
         self._trade_conf_bar.setMaximumHeight(22)
-        layout.addWidget(self._trade_conf_bar)
+        self._trade_conf_bar.setVisible(False)
 
         self._trade_conf_label = QLabel()
-        layout.addWidget(self._trade_conf_label)
+        self._trade_conf_label.setVisible(False)
 
         self._trade_reasoning_label = QLabel()
         self._trade_reasoning_label.setWordWrap(True)
-        self._trade_reasoning_label.setObjectName("mutedLabel")
+        self._trade_reasoning_label.setStyleSheet(_REASON_FONT_CSS)
         layout.addWidget(self._trade_reasoning_label)
 
         reasoning_title = QLabel("分析理由")
-        reasoning_title.setStyleSheet("font-weight: bold; color: #a371f7;")
+        reasoning_title.setStyleSheet("font-weight: bold; color: #a371f7; margin-top: 6px;")
         layout.addWidget(reasoning_title)
 
         self._reasoning_edit = QTextEdit()
         self._reasoning_edit.setReadOnly(True)
         self._reasoning_edit.setObjectName("answerPane")
+        self._reasoning_edit.setStyleSheet(_REASON_EDIT_CSS)
         self._reasoning_edit.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
-        layout.addWidget(self._reasoning_edit, stretch=1)
+        self._reasoning_edit.setMinimumHeight(80)
+        self._reasoning_edit.setMaximumHeight(200)
+        layout.addWidget(self._reasoning_edit)
+
+        # ── 下一根K线预期 (R6) ─────────────────────────────────────────────
+        self._prediction_group = QFrame()
+        self._prediction_group.setObjectName("predictionGroup")
+        pred_layout = QVBoxLayout(self._prediction_group)
+        pred_layout.setContentsMargins(0, 8, 0, 0)
+        pred_layout.setSpacing(6)
+
+        self._prediction_title = QLabel("下一根K线预期")
+        self._prediction_title.setStyleSheet("font-weight: bold; color: #79c0ff;")
+        pred_layout.addWidget(self._prediction_title)
+
+        self._prediction_direction_label = QLabel("—")
+        self._prediction_direction_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._prediction_direction_label.setWordWrap(True)
+        self._prediction_direction_label.setStyleSheet(
+            "font-size: 16px; font-weight: bold; padding: 8px;"
+            "background-color: #21262d; border-radius: 6px; color: #8b949e;"
+        )
+        pred_layout.addWidget(self._prediction_direction_label)
+
+        self._prediction_reasoning_edit = QTextEdit()
+        self._prediction_reasoning_edit.setReadOnly(True)
+        self._prediction_reasoning_edit.setObjectName("answerPane")
+        self._prediction_reasoning_edit.setStyleSheet(_REASON_EDIT_CSS)
+        self._prediction_reasoning_edit.setMaximumHeight(120)
+        self._prediction_reasoning_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
+        pred_layout.addWidget(self._prediction_reasoning_edit)
+
+        self._prediction_group.setVisible(False)
+        layout.addWidget(self._prediction_group)
+
+        layout.addStretch(1)
 
         self.clear()
+
+    def _apply_diag_chip_style(self, label: QLabel, *, color: str) -> None:
+        label.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; padding: 8px 10px;"
+            f"color: {color}; background-color: #21262d; border-radius: 8px;"
+        )
 
     # ── Data binding helpers ──────────────────────────────────────────────
 
@@ -295,29 +388,31 @@ class DecisionPanel(QWidget):
         market_phase = str(src.get("market_phase", "") or "")
 
         trend = _infer_trend_label(direction, cycle_position)
-        color = _trend_color(trend)
-        self._trend_label.setText(f"趋势判断：{trend}")
-        self._trend_label.setStyleSheet(
-            f"font-size: 20px; font-weight: bold; padding: 10px;"
-            f"color: {color}; background-color: #21262d; border-radius: 8px;"
-        )
+        trend_color = _trend_color(trend)
+        self._trend_label.setText(f"趋势：{trend}")
+        self._apply_diag_chip_style(self._trend_label, color=trend_color)
 
         cycle_zh = _format_cycle_position(cycle_position)
-        cycle_line = f"市场周期：{cycle_zh}"
+        cycle_text = f"周期：{cycle_zh}"
         if alt_cycle:
-            cycle_line += f"（备选：{_format_cycle_position(str(alt_cycle))}）"
-        self._cycle_label.setText(cycle_line)
+            cycle_text += f"（备选 {_format_cycle_position(str(alt_cycle))}）"
+        self._cycle_label.setText(cycle_text)
+        self._apply_diag_chip_style(self._cycle_label, color="#c9d1d9")
 
         if market_phase:
             phase_zh = _format_market_phase(market_phase)
             extra = ""
             risk = src.get("transition_risk")
             if market_phase == "transitioning" and risk:
-                extra = f" · 过渡风险 {risk}"
-            self._phase_label.setText(f"市场阶段：{phase_zh}{extra}")
+                extra = f" · 风险 {risk}"
+            self._phase_label.setText(f"阶段：{phase_zh}{extra}")
             self._phase_label.setVisible(True)
+            phase_color = "#e6b800" if market_phase == "transitioning" else "#58a6ff"
+            self._apply_diag_chip_style(self._phase_label, color=phase_color)
         else:
-            self._phase_label.setVisible(False)
+            self._phase_label.setText("阶段：—")
+            self._apply_diag_chip_style(self._phase_label, color="#6e7681")
+            self._phase_label.setVisible(True)
 
     def _apply_diagnosis_confidence(
         self,
@@ -349,48 +444,41 @@ class DecisionPanel(QWidget):
             self._diag_conf_label.setVisible(False)
             self._diag_reasoning_label.setVisible(False)
 
-    def _apply_trade_confidence(
+    def _apply_trade_confidence_inline(
         self,
         trade_confidence: object,
         trade_confidence_reasoning: str | None,
         *,
         no_order: bool = False,
     ) -> None:
-        """Render trade-decision confidence bar (Stage 2 trade_confidence)."""
+        """Show trade confidence on the summary row; optional reasoning below."""
         score = _parse_score_100(trade_confidence)
         if score is not None:
             c_color = _score_color(score)
-            hint = "观望决策" if no_order else "入场决策"
-            self._trade_conf_bar.setValue(score)
-            self._trade_conf_bar.setStyleSheet(
-                f"QProgressBar::chunk {{ background-color: {c_color}; }}"
+            hint = "观望" if no_order else "入场"
+            self._trade_conf_inline_label.setText(
+                f"置信度 {score} / 100 · {hint}"
             )
-            self._trade_conf_label.setText(f"评分 {score} / 100 · {hint}")
-            self._trade_conf_label.setStyleSheet(f"color: {c_color}; font-weight: bold;")
+            self._trade_conf_inline_label.setStyleSheet(
+                f"font-size: 15px; font-weight: bold; color: {c_color};"
+            )
+            self._trade_conf_inline_label.setVisible(True)
             reason_text = str(trade_confidence_reasoning or "").strip()
             self._trade_reasoning_label.setText(
-                f"理由：{reason_text}" if reason_text else ""
+                f"置信度理由：{reason_text}" if reason_text else ""
             )
-            self._trade_conf_title.setVisible(True)
-            self._trade_conf_bar.setVisible(True)
-            self._trade_conf_label.setVisible(True)
             self._trade_reasoning_label.setVisible(bool(reason_text))
         else:
-            self._trade_conf_bar.setValue(0)
-            self._trade_conf_title.setVisible(False)
-            self._trade_conf_bar.setVisible(False)
-            self._trade_conf_label.setVisible(False)
+            self._trade_conf_inline_label.setText("")
+            self._trade_conf_inline_label.setVisible(False)
             self._trade_reasoning_label.setVisible(False)
 
-    def _set_conclusion_bar_style(self, *, center_color: str) -> None:
+    def _set_conclusion_bar_style(self) -> None:
         self._conclusion_bar.setStyleSheet(
             "QFrame#conclusionBar {"
             "  background-color: #21262d;"
             "  border-radius: 8px;"
             "}"
-        )
-        self._conclusion_label.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {center_color};"
         )
 
     def _reset_conclusion_bar_side_labels(self) -> None:
@@ -398,6 +486,42 @@ class DecisionPanel(QWidget):
         self._win_rate_inline_label.setText("—")
         self._rr_inline_label.setVisible(False)
         self._win_rate_inline_label.setVisible(False)
+
+    def _apply_next_bar_prediction(self, decision: dict) -> None:
+        """Render next_bar_prediction group (R6). Silently hides on missing/invalid."""
+        pred = decision.get("next_bar_prediction")
+        if not isinstance(pred, dict):
+            self._prediction_group.setVisible(False)
+            self._prediction_direction_label.setText("—")
+            self._prediction_reasoning_edit.clear()
+            return
+
+        unpredictable = bool(pred.get("unpredictable", False))
+        if unpredictable:
+            line = _PREDICTION_UNPREDICTABLE_LABEL
+            color = _PREDICTION_UNPREDICTABLE_COLOR
+        else:
+            probs = pred.get("probabilities")
+            if isinstance(probs, dict):
+                line = _format_prediction_probs_line(probs)
+                dominant = _dominant_prediction_direction(probs)
+                color = _PREDICTION_DOMINANT_COLOR.get(
+                    dominant, _PREDICTION_UNPREDICTABLE_COLOR
+                )
+            else:
+                line = "—"
+                color = _PREDICTION_UNPREDICTABLE_COLOR
+
+        self._prediction_direction_label.setText(line)
+        self._prediction_direction_label.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; padding: 8px;"
+            f"background-color: #21262d; border-radius: 6px;"
+            f"color: {color};"
+        )
+
+        reasoning = str(pred.get("reasoning", "")).strip()
+        self._prediction_reasoning_edit.setPlainText(reasoning)
+        self._prediction_group.setVisible(True)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -422,10 +546,16 @@ class DecisionPanel(QWidget):
 
         if order_type == _NO_ORDER:
             self._reset_conclusion_bar_side_labels()
-            self._conclusion_label.setText("不下单")
-            self._set_conclusion_bar_style(center_color="#8b949e")
-            self._details_widget.setVisible(False)
-            self._apply_trade_confidence(
+            self._conclusion_label.setText(_NO_ORDER)
+            self._conclusion_label.setStyleSheet(
+                "font-size: 18px; font-weight: bold; color: #8b949e;"
+            )
+            self._direction_inline_label.setText("")
+            self._direction_inline_label.setVisible(False)
+            self._trade_prices_row.setVisible(False)
+            self._conclusion_bar.setVisible(False)
+            self._set_conclusion_bar_style()
+            self._apply_trade_confidence_inline(
                 trade_conf, trade_conf_reasoning,
                 no_order=True,
             )
@@ -435,9 +565,26 @@ class DecisionPanel(QWidget):
             tp = decision.get("take_profit_price")
             sl = decision.get("stop_loss_price")
 
-            self._conclusion_label.setText(order_type)
+            self._conclusion_label.setText(str(order_type))
             color = "#3fb950" if "多" in str(direction) else "#f85149"
-            self._set_conclusion_bar_style(center_color=color)
+            self._conclusion_label.setStyleSheet(
+                f"font-size: 18px; font-weight: bold; color: {color};"
+            )
+            self._direction_inline_label.setText(f"方向 {direction}")
+            self._direction_inline_label.setStyleSheet(
+                f"font-size: 14px; font-weight: bold; color: {color};"
+            )
+            self._direction_inline_label.setVisible(True)
+
+            self._entry_label.setText(
+                f"入场  {entry:.5g}" if entry is not None else "入场  —"
+            )
+            self._tp_label.setText(f"止盈  {tp:.5g}" if tp is not None else "止盈  —")
+            self._sl_label.setText(f"止损  {sl:.5g}" if sl is not None else "止损  —")
+            self._trade_prices_row.setVisible(True)
+
+            self._conclusion_bar.setVisible(True)
+            self._set_conclusion_bar_style()
 
             rr = compute_risk_reward(entry, tp, sl, direction)
             if rr is not None:
@@ -472,35 +619,25 @@ class DecisionPanel(QWidget):
             win_rate = format_estimated_win_rate(decision)
             if win_rate:
                 self._win_rate_inline_label.setText(f"预估胜率  {win_rate}")
-                self._win_rate_inline_label.setVisible(True)
             else:
                 self._win_rate_inline_label.setText("预估胜率  —")
-                self._win_rate_inline_label.setVisible(True)
+            self._win_rate_inline_label.setVisible(True)
 
-            self._direction_label.setText(f"方向  {direction}")
-            self._order_type_label.setText(f"类型  {order_type}")
-            self._entry_label.setText(
-                f"入场  {entry:.5g}" if entry is not None else "入场  —"
-            )
-            self._tp_label.setText(f"止盈  {tp:.5g}" if tp is not None else "止盈  —")
-            self._sl_label.setText(f"止损  {sl:.5g}" if sl is not None else "止损  —")
-
-            self._details_widget.setVisible(True)
-            self._apply_trade_confidence(
+            self._apply_trade_confidence_inline(
                 trade_conf, trade_conf_reasoning,
                 no_order=False,
             )
 
         self._reasoning_edit.setPlainText(str(reasoning) if reasoning else "")
+        self._apply_next_bar_prediction(decision)
 
     def clear(self) -> None:
-        self._trend_label.setText("趋势判断：—")
-        self._trend_label.setStyleSheet(
-            "font-size: 20px; font-weight: bold; padding: 10px;"
-            "color: #6e7681; background-color: #21262d; border-radius: 8px;"
-        )
-        self._cycle_label.setText("市场周期：—")
-        self._phase_label.setText("市场阶段：—")
+        self._trend_label.setText("趋势：—")
+        self._apply_diag_chip_style(self._trend_label, color="#6e7681")
+        self._cycle_label.setText("周期：—")
+        self._apply_diag_chip_style(self._cycle_label, color="#6e7681")
+        self._phase_label.setText("阶段：—")
+        self._apply_diag_chip_style(self._phase_label, color="#6e7681")
         self._phase_label.setVisible(True)
 
         self._diag_conf_bar.setValue(0)
@@ -510,16 +647,19 @@ class DecisionPanel(QWidget):
         self._diag_reasoning_label.setVisible(False)
 
         self._reset_conclusion_bar_side_labels()
+        self._conclusion_bar.setVisible(False)
         self._conclusion_label.setText("等待分析")
-        self._set_conclusion_bar_style(center_color="#6e7681")
         self._conclusion_label.setStyleSheet(
             "font-size: 16px; font-weight: bold; color: #6e7681;"
         )
-        self._details_widget.setVisible(False)
-
-        self._trade_conf_bar.setValue(0)
-        self._trade_conf_title.setVisible(False)
-        self._trade_conf_bar.setVisible(False)
-        self._trade_conf_label.setVisible(False)
+        self._direction_inline_label.setText("")
+        self._direction_inline_label.setVisible(False)
+        self._trade_prices_row.setVisible(False)
+        self._trade_conf_inline_label.setVisible(False)
         self._trade_reasoning_label.setVisible(False)
+
+        self._prediction_group.setVisible(False)
+        self._prediction_direction_label.setText("—")
+        self._prediction_reasoning_edit.clear()
+
         self._reasoning_edit.clear()

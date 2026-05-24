@@ -105,7 +105,7 @@ def test_free_chat_after_analysis(qtbot, tmp_path):
     qtbot.addWidget(window)
     window.show()
 
-    window._bar_count_spin.setValue(5)
+    window._ctx.settings.general.analysis_bar_count = 5
 
     # Run two-stage analysis
     window._on_submit_analysis()

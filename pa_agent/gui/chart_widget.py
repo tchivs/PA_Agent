@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer
 
 from pa_agent.gui.widgets.candle_item import CandleItem
 from pa_agent.gui.widgets.overlay_lines import OverlayLines
@@ -27,6 +27,12 @@ if TYPE_CHECKING:
 _TIMER_INTERVAL_MS = 33  # ~30 Hz
 _EMA_COLOR = (255, 200, 0)  # amber
 _NO_ORDER_TEXT = "不下单"
+_X_MARGIN_BARS = 0.65
+_Y_PADDING_RATIO = 0.07
+_Y_TOP_EXTRA_RATIO = 0.04
+_FIT_VISIBLE_BARS = 20
+_AXIS_RESIZE_MIN_WIDTH = 40
+_AXIS_RESIZE_EDGE_PX = 8
 
 
 class ChartWidget(pg.PlotWidget):
@@ -56,6 +62,16 @@ class ChartWidget(pg.PlotWidget):
         self._pending_decision: dict | None = None
         self._direction_items: list[pg.GraphicsItem] = []
         self._seq_label_font_pt: int = 7
+        self._fit_on_next_render: bool = False
+        self._first_frame_fitted: bool = False
+
+        # Price-axis resize state
+        self._axis_resizing: bool = False
+        self._axis_drag_origin_x: float = 0.0
+        self._axis_drag_origin_w: float = 0.0
+
+        vb = self.getViewBox()
+        vb.enableAutoRange(x=False, y=False)
 
         # 30 Hz redraw timer (task 14.5)
         self._timer = QTimer(self)
@@ -74,16 +90,39 @@ class ChartWidget(pg.PlotWidget):
         if self._latest_frame is not None:
             self._dirty = True
 
-    def set_frame(self, frame: "KlineFrame") -> None:
+    def set_frame(self, frame: "KlineFrame", *, fit_view: bool = False) -> None:
         """Cache the latest KlineFrame; actual redraw happens on the timer."""
         self._latest_frame = frame
+        if fit_view or not self._first_frame_fitted:
+            self._fit_on_next_render = True
         self._dirty = True
 
-    def set_frame_now(self, frame: "KlineFrame") -> None:
+    def set_frame_now(self, frame: "KlineFrame", *, fit_view: bool = False) -> None:
         """Apply *frame* to the chart immediately (bypass 30 Hz throttle)."""
         self._latest_frame = frame
         self._dirty = False
         self._render_frame(frame)
+        if fit_view:
+            self.fit_view()
+
+    def request_fit_on_next_render(self) -> None:
+        """Zoom/pan to fit the next rendered frame (or now if one is already shown)."""
+        self._fit_on_next_render = True
+        if self._latest_frame is not None:
+            self._dirty = True
+
+    def fit_view(self) -> None:
+        """Set view range to show all bars and a comfortable price span."""
+        frame = self._latest_frame
+        if frame is None or not frame.bars:
+            return
+        x_range, y_range = self._view_ranges_for_frame(frame)
+        self.getViewBox().setRange(
+            xRange=x_range,
+            yRange=y_range,
+            padding=0,
+        )
+        self._first_frame_fitted = True
 
     def displayed_frame(self) -> "KlineFrame | None":
         """Return the KlineFrame currently shown on the chart."""
@@ -119,6 +158,76 @@ class ChartWidget(pg.PlotWidget):
         self._clear_direction_marker()
         self._pending_decision = None
 
+    # ── Price-axis resize via viewportEvent ──────────────────────────────────
+
+    def _axis_right_edge_wx(self) -> float:
+        """Right edge x of the left price axis in viewport coordinates."""
+        axis = self.getPlotItem().getAxis("left")
+        geom = axis.geometry()  # layout-managed rect (not sceneBoundingRect!)
+        return float(self.mapFromScene(geom.bottomRight()).x())
+
+    def _axis_vertical_range_wy(self) -> tuple[float, float]:
+        """Top/bottom y of the left price axis in viewport coordinates."""
+        axis = self.getPlotItem().getAxis("left")
+        geom = axis.geometry()
+        return (
+            float(self.mapFromScene(geom.topLeft()).y()),
+            float(self.mapFromScene(geom.bottomRight()).y()),
+        )
+
+    def _in_axis_resize_zone(self, vx: float, vy: float) -> bool:
+        """True when (vx, vy) is within ``_AXIS_RESIZE_EDGE_PX`` of the axis right edge."""
+        edge = self._axis_right_edge_wx()
+        top, bot = self._axis_vertical_range_wy()
+        return abs(vx - edge) < _AXIS_RESIZE_EDGE_PX and top <= vy <= bot
+
+    def viewportEvent(self, ev):  # noqa: N802
+        """Intercept viewport mouse events to handle price-axis width resizing.
+
+        This is the canonical entry-point for viewport events in
+        ``QAbstractScrollArea`` (parent of ``QGraphicsView``).  We check
+        whether the event is inside the price-axis resize zone; if so, we
+        handle the drag ourselves and return ``True`` to prevent the event
+        from reaching ``QGraphicsView::viewportEvent`` (and thus the scene).
+        Otherwise we delegate to the superclass so normal pan/zoom/drag
+        on the ViewBox works as usual.
+        """
+        et = ev.type()
+
+        if et == QEvent.Type.MouseMove:
+            pos = ev.position()
+            if self._axis_resizing:
+                dx = pos.x() - self._axis_drag_origin_x
+                new_w = max(
+                    _AXIS_RESIZE_MIN_WIDTH,
+                    int(self._axis_drag_origin_w + dx),
+                )
+                self.getPlotItem().getAxis("left").setWidth(new_w)
+                ev.accept()
+                return True  # consume event — don't forward to scene
+            # Cursor hint (on the viewport, not the QGraphicsView)
+            vp = self.viewport()
+            if self._in_axis_resize_zone(pos.x(), pos.y()):
+                vp.setCursor(Qt.CursorShape.SplitHCursor)
+            else:
+                vp.unsetCursor()
+
+        elif et == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
+            pos = ev.position()
+            if self._in_axis_resize_zone(pos.x(), pos.y()):
+                self._axis_resizing = True
+                self._axis_drag_origin_x = pos.x()
+                self._axis_drag_origin_w = self.getPlotItem().getAxis("left").width()
+                ev.accept()
+                return True
+
+        elif et == QEvent.Type.MouseButtonRelease and self._axis_resizing:
+            self._axis_resizing = False
+            ev.accept()
+            return True
+
+        return super().viewportEvent(ev)
+
     def reset(self) -> None:
         """Clear all chart items (candles, labels, EMA, overlay lines)."""
         self.clear_decision_overlay()
@@ -128,6 +237,8 @@ class ChartWidget(pg.PlotWidget):
             self._ema_line = None
         self._latest_frame = None
         self._dirty = False
+        self._fit_on_next_render = False
+        self._first_frame_fitted = False
 
     # ── Timer slot ────────────────────────────────────────────────────────────
 
@@ -146,7 +257,6 @@ class ChartWidget(pg.PlotWidget):
         if self._ema_line is not None:
             self.removeItem(self._ema_line)
             self._ema_line = None
-
         bars = frame.bars
         n = len(bars)
         if n == 0:
@@ -160,16 +270,22 @@ class ChartWidget(pg.PlotWidget):
         for i, bar in enumerate(bars):
             x_pos = n - 1 - i  # oldest bar at x=0, newest at x=n-1
 
-            # Candle
-            candle = CandleItem(bar, x_pos)
+            forming = not bar.closed
+
+            # Candle (forming bar: semi-transparent dashed outline)
+            candle = CandleItem(bar, x_pos, forming=forming)
             self.addItem(candle)
             self._candle_items.append(candle)
 
-            # Sequence label above the high — only odd seq numbers (1, 3, 5, …)
-            if bar.seq % 2 == 1:
+            # Sequence label — odd seq; always label forming bar
+            if bar.seq % 2 == 1 or forming:
                 label_y = bar.high
                 seq_label = SeqLabelItem(
-                    bar.seq, x_pos, label_y, font_pt=self._seq_label_font_pt
+                    bar.seq,
+                    x_pos,
+                    label_y,
+                    font_pt=self._seq_label_font_pt,
+                    forming=forming,
                 )
                 self.addItem(seq_label)
                 self._seq_labels.append(seq_label)
@@ -180,16 +296,72 @@ class ChartWidget(pg.PlotWidget):
                 ema_x.append(float(x_pos))
                 ema_y.append(ema_val)
 
-        # EMA20 line
+        # EMA20 line (slightly dimmed through forming bar)
         if ema_x:
+            newest_forming = len(bars) > 0 and not bars[0].closed
+            ema_color: tuple[int, ...] = _EMA_COLOR
+            if newest_forming:
+                ema_color = (255, 200, 0, 140)
             self._ema_line = pg.PlotDataItem(
                 x=np.array(ema_x),
                 y=np.array(ema_y),
-                pen=pg.mkPen(color=_EMA_COLOR, width=1),
+                pen=pg.mkPen(color=ema_color, width=1),
             )
             self.addItem(self._ema_line)
 
         self._update_direction_marker()
+
+        if self._fit_on_next_render:
+            self._fit_on_next_render = False
+            self.fit_view()
+
+    def _view_ranges_for_frame(
+        self,
+        frame: "KlineFrame",
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Compute (x_range, y_range) for the newest ``_FIT_VISIBLE_BARS`` bars."""
+        bars = frame.bars
+        n = len(bars)
+        visible_count = min(_FIT_VISIBLE_BARS, n)
+        visible_bars = bars[:visible_count]
+        visible_ema = frame.indicators.ema20[:visible_count]
+
+        y_min = min(b.low for b in visible_bars)
+        y_max = max(b.high for b in visible_bars)
+
+        for ema_val in visible_ema:
+            if not math.isnan(ema_val):
+                y_min = min(y_min, ema_val)
+                y_max = max(y_max, ema_val)
+
+        decision = self._pending_decision
+        if decision is not None:
+            for key in ("entry_price", "take_profit_price", "stop_loss_price"):
+                raw = decision.get(key)
+                if raw is None:
+                    continue
+                try:
+                    price = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                y_min = min(y_min, price)
+                y_max = max(y_max, price)
+
+        span = y_max - y_min
+        if span <= 0:
+            mid = y_max if y_max != 0 else 1.0
+            span = abs(mid) * 0.01 or 1.0
+        y_pad = span * _Y_PADDING_RATIO
+        y_top = span * _Y_TOP_EXTRA_RATIO
+
+        # x=0 is oldest; newest bar is at x=n-1 — show only the rightmost window.
+        x_left = float(max(0, n - _FIT_VISIBLE_BARS))
+        x_min = x_left - _X_MARGIN_BARS
+        x_max = float(n - 1) + _X_MARGIN_BARS
+        return (
+            (x_min, x_max),
+            (y_min - y_pad, y_max + y_pad + y_top),
+        )
 
     def _clear_direction_marker(self) -> None:
         for item in self._direction_items:

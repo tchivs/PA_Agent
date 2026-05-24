@@ -11,6 +11,7 @@ from typing import Any
 from pa_agent.ai.decision_stance import build_decision_stance_guidance, normalize_stance
 from pa_agent.ai.kline_features import bar_candle_direction_label, compute_kline_geometry_features
 from pa_agent.data.base import KlineFrame
+from pa_agent.data.datetime_ts import format_epoch_for_display
 from pa_agent.records.schema import AnalysisRecord
 
 logger = logging.getLogger(__name__)
@@ -343,6 +344,35 @@ trade_confidence_reasoning：必须简要说明打分依据（如“入场信号
 estimated_win_rate_reasoning：必须简要说明依据（如“宽通道顺势 Low1，结构支持约 45–50%，取 47% 用于方程”）
 """.strip()
 
+_NEXT_BAR_PREDICTION_INSTRUCTION = """\
+## 下一根K线预测任务（阶段二附加输出，不影响下单决策）
+
+完成 decision / decision_trace / terminal 后，必须在阶段二 JSON 顶层追加键 `next_bar_prediction`，
+表达对下一根（尚未开始或正在形成）K线收盘后的方向预测：
+
+```json
+"next_bar_prediction": {
+  "direction": "bullish|bearish|neutral",
+  "probabilities": {"bullish": 45, "bearish": 35, "neutral": 20},
+  "reasoning": "简体中文理由，30–1500 字。须明确引用阶段一诊断、最近 K 线几何特征、以及（若提供）上一轮预测摘要。",
+  "unpredictable": false,
+  "features_used": ["stage1_diagnosis", "kline_features"]
+}
+```
+
+硬约束（违反则整体阶段二 JSON 校验失败）：
+
+1. probabilities 三个值均为 0–100 整数，三者之和必须落在 [99, 101]（容差 ±1，源于取整）。
+2. direction 必须等于 probabilities 中数值最大的键；并列最大时取 JSON 出现顺序中靠前的键
+   （即按 bullish → bearish → neutral 的字面顺序）。
+3. reasoning 长度 30–1500 字，简体中文，不写下单价格、不写止损止盈，仅讨论方向与概率依据。
+4. features_used 至少包含 "stage1_diagnosis"；若提示词中提供了对应来源，应同步包含
+   "kline_features" / "analysis_history" / "experience_library"。
+5. 数据不足（K 线数 < 8）、或阶段一诊断为 extreme_tr / unknown、或市场极端混乱时：
+   设 unpredictable=true，direction=null，probabilities=null，reasoning 写明原因。
+6. 此预测**不**进入交易者方程、**不**改变 decision 中任意字段，仅作辅助参考。
+""".strip()
+
 # txt files merged into each stage prompt (order preserved)
 # 二元决策.txt lives in system once — shared by Stage 1 and Stage 2 (avoids ~10k×2 chars/run).
 COMMON_SYSTEM_PROMPT_TXT_FILES: tuple[str, ...] = (
@@ -456,8 +486,7 @@ class PromptAssembler:
             ema_str = f"{ema:.4f}" if not math.isnan(ema) else "N/A"
             atr_str = f"{atr:.4f}" if not math.isnan(atr) else "N/A"
             yang_yin = bar_candle_direction_label(bar)
-            # ts_open is in milliseconds (MT5 source); convert to seconds for fromtimestamp()
-            dt = datetime.datetime.fromtimestamp(bar.ts_open / 1000).strftime("%Y-%m-%d %H:%M")
+            dt = format_epoch_for_display(bar.ts_open, short=True)
             lines.append(
                 f"{bar.seq:<4} | {dt:<19} | {bar.open:<9.4f} | {bar.high:<9.4f} | "
                 f"{bar.low:<9.4f} | {bar.close:<9.4f} | {yang_yin:<4} | {bar.volume:<9.0f} | "
@@ -635,6 +664,40 @@ class PromptAssembler:
             {"role": "user", "content": user_content},
         ]
 
+    @staticmethod
+    def _render_previous_prediction(previous_record: Any) -> str:
+        """Render previous-bar prediction summary for incremental context (R5.2)."""
+        if previous_record is None:
+            return ""
+        # previous_record may be AnalysisRecord or dict-like
+        s2 = getattr(previous_record, "stage2_decision", None)
+        if s2 is None and isinstance(previous_record, dict):
+            s2 = previous_record.get("stage2_decision")
+        if not isinstance(s2, dict):
+            return ""
+        pred = s2.get("next_bar_prediction")
+        if not isinstance(pred, dict):
+            return ""
+
+        unpredictable = bool(pred.get("unpredictable", False))
+        if unpredictable:
+            return (
+                "## 上一轮下一根K线预测\n\n"
+                "上一轮标记为不可预测；本轮请独立判断。\n"
+            )
+
+        direction = pred.get("direction") or "—"
+        probs = pred.get("probabilities") or {}
+        bull = probs.get("bullish", "?")
+        bear = probs.get("bearish", "?")
+        neut = probs.get("neutral", "?")
+        dir_zh = {"bullish": "阳线", "bearish": "阴线", "neutral": "中性"}.get(direction, direction)
+        return (
+            "## 上一轮下一根K线预测\n\n"
+            f"方向：{dir_zh}（阳 {bull}% / 阴 {bear}% / 中性 {neut}%）。"
+            "本轮请基于最新数据独立重新预测，不必延续上轮结论。\n"
+        )
+
     def build_stage2_continuation(
         self,
         *,
@@ -645,6 +708,7 @@ class PromptAssembler:
         strategy_files: list[str],
         experience_entries: list[Any],
         decision_stance: str = "conservative",
+        previous_record: Any | None = None,
     ) -> list[dict]:
         """Build Stage 2 continuation without duplicating the Stage 1 user prompt.
 
@@ -667,6 +731,7 @@ class PromptAssembler:
                     experience_entries=experience_entries,
                     include_kline_table=True,
                     decision_stance=decision_stance,
+                    previous_record=previous_record,
                 ),
             },
         ]
@@ -680,6 +745,7 @@ class PromptAssembler:
         experience_entries: list[Any],
         include_kline_table: bool,
         decision_stance: str = "conservative",
+        previous_record: Any | None = None,
     ) -> str:
         """Build the Stage 2 task turn for standalone or continuation mode."""
         stance_block = build_decision_stance_guidance(normalize_stance(decision_stance))
@@ -692,6 +758,7 @@ class PromptAssembler:
         if experience_entries:
             stage2_parts.append(self._render_experience(experience_entries))
         stage2_parts.append(_STAGE2_OUTPUT_CONTRACT)
+        stage2_parts.append(_NEXT_BAR_PREDICTION_INSTRUCTION)
         stage2_context = "\n\n---\n\n".join(p for p in stage2_parts if p)
 
         kline_table = self._render_kline_table(frame)
@@ -714,6 +781,7 @@ class PromptAssembler:
             if include_kline_table
             else f"## K线数据\n\n沿用上一轮阶段一用户消息中的同一份 K线数据，共 {n_bars} 根；各节点 bar_range 由你据实填写。\n\n"
         )
+        prev_pred_block = self._render_previous_prediction(previous_record)
         return (
             "## 阶段二任务\n\n"
             "继续上一轮对话。你已经完成阶段一诊断；现在只执行阶段二：交易决策、风险收益和下单方式评估。\n"
@@ -723,6 +791,7 @@ class PromptAssembler:
             f"## 阶段一诊断结果\n\n```json\n{json.dumps(stage1_json, ensure_ascii=False, indent=2)}\n```\n\n"
             f"{gate_block}"
             f"{kline_block}"
+            f"{prev_pred_block + chr(10) if prev_pred_block else ''}"
             f"请根据以上诊断、闸门路径和K线数据,按《二元决策.txt》§3–§15 输出 JSON 决策结果"
             f"(含 decision_trace 与 terminal)。\n"
             f"注意:如果判断不下单,entry_price、take_profit_price、stop_loss_price、order_direction 必须全部为 null。\n\n"

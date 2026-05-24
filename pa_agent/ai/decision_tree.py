@@ -408,6 +408,16 @@ def build_stage2_gate_wait_response(stage1_json: dict[str, Any]) -> dict[str, An
             "label": label,
         },
         "gate_shortcircuited": True,
+        "next_bar_prediction": {
+            "direction": None,
+            "probabilities": None,
+            "reasoning": (
+                f"阶段一闸门结论为「{stage1_json.get('gate_result', 'wait')}」（节点 {node_id}），"
+                "未进入策略分支评估，亦不预测下一根 K 线方向。"
+            ),
+            "unpredictable": True,
+            "features_used": ["stage1_diagnosis"],
+        },
     }
 
 

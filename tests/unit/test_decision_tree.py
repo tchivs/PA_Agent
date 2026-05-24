@@ -142,3 +142,80 @@ def test_stage2_trade_requires_10_3_before_11() -> None:
     }
     errs = validate_stage2_trace_consistency(bad)
     assert any("10.3" in e or "11" in e for e in errs)
+
+
+# ── T8: Short-circuit path tests for next_bar_prediction ─────────────────────
+
+
+def test_gate_wait_response_contains_unpredictable_prediction() -> None:
+    stage1 = {
+        "cycle_position": "unknown",
+        "direction": "neutral",
+        "diagnosis_confidence": 20,
+        "key_signals": [],
+        "gate_trace": [
+            {
+                "node_id": "1.2",
+                "question": "是否能识别市场周期？",
+                "answer": "否",
+                "reason": "无法归类",
+            }
+        ],
+        "gate_result": "wait",
+        "risk_warning": "诊断不清",
+    }
+    s2 = build_stage2_gate_wait_response(stage1)
+    pred = s2.get("next_bar_prediction")
+    assert isinstance(pred, dict), f"Expected dict, got {type(pred)}"
+    assert pred["unpredictable"] is True
+    assert pred["direction"] is None
+    assert pred["probabilities"] is None
+
+
+def test_gate_unknown_response_contains_unpredictable_prediction() -> None:
+    stage1 = {
+        "cycle_position": "extreme_tr",
+        "direction": "neutral",
+        "diagnosis_confidence": 10,
+        "key_signals": [],
+        "gate_trace": [
+            {
+                "node_id": "0.1",
+                "question": "是否看得懂当前市场？",
+                "answer": "否",
+                "reason": "极端行情",
+            }
+        ],
+        "gate_result": "unknown",
+        "risk_warning": "极端",
+    }
+    s2 = build_stage2_gate_wait_response(stage1)
+    pred = s2.get("next_bar_prediction")
+    assert isinstance(pred, dict)
+    assert pred["unpredictable"] is True
+
+
+def test_gate_wait_prediction_passes_schema() -> None:
+    """Short-circuit response with unpredictable prediction must pass full Stage 2 validation."""
+    from pa_agent.ai.json_validator import JsonValidator, Ok
+
+    stage1 = {
+        "cycle_position": "unknown",
+        "direction": "neutral",
+        "diagnosis_confidence": 20,
+        "key_signals": [],
+        "gate_trace": [
+            {
+                "node_id": "1.2",
+                "question": "是否能识别市场周期？",
+                "answer": "否",
+                "reason": "无法归类",
+            }
+        ],
+        "gate_result": "wait",
+        "risk_warning": "诊断不清",
+    }
+    s2 = build_stage2_gate_wait_response(stage1)
+    import json
+    result = JsonValidator().validate("stage2", json.dumps(s2, ensure_ascii=False))
+    assert isinstance(result, Ok), f"Expected Ok, got {result}"

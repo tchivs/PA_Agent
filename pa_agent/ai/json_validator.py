@@ -349,6 +349,9 @@ class JsonValidator:
             for msg in self._check_signal_chain(obj, kline_frame):
                 invalid.append(f"signal_chain:{msg}")
 
+            for msg in self._check_next_bar_prediction(obj):
+                invalid.append(msg)
+
             for msg in self._check_trade_metrics(obj, decision_stance=decision_stance):
                 invalid.append(f"metrics:{msg}")
 
@@ -500,6 +503,60 @@ class JsonValidator:
                 f"K{basis}.low={float(bar.low):.6g}"
             )
         return []
+
+    @staticmethod
+    def _check_next_bar_prediction(obj: dict) -> list[str]:
+        """Cross-field validation: sum constraint, direction=argmax, null consistency.
+
+        Returns error message list; caller adds each to invalid_fields.
+        """
+        pred = obj.get("next_bar_prediction")
+        if pred is None:
+            return []  # Missing field is backward-compatible (R2.3, R7.3)
+        if not isinstance(pred, dict):
+            return ["next_bar_prediction: must be an object when present"]
+
+        errors: list[str] = []
+        unpredictable = bool(pred.get("unpredictable", False))
+
+        if unpredictable:
+            if pred.get("direction") is not None:
+                errors.append("next_bar_prediction.direction: must be null when unpredictable=true")
+            if pred.get("probabilities") is not None:
+                errors.append("next_bar_prediction.probabilities: must be null when unpredictable=true")
+            return errors
+
+        # unpredictable=false path
+        probs = pred.get("probabilities")
+        if not isinstance(probs, dict):
+            return ["next_bar_prediction.probabilities: must be an object when unpredictable=false"]
+
+        for key in ("bullish", "bearish", "neutral"):
+            value = probs.get(key)
+            if not isinstance(value, int) or not (0 <= value <= 100):
+                errors.append(f"next_bar_prediction.probabilities.{key}: must be int in [0, 100]")
+        if errors:
+            return errors
+
+        # R3.2: sum in [99, 101]
+        total = probs["bullish"] + probs["bearish"] + probs["neutral"]
+        if not (99 <= total <= 101):
+            errors.append(
+                f"next_bar_prediction.probabilities: sum={total}, must satisfy 99 <= sum <= 101"
+            )
+
+        # R3.3: direction = argmax, break ties by literal order
+        order = ("bullish", "bearish", "neutral")
+        max_value = max(probs[k] for k in order)
+        expected = next(k for k in order if probs[k] == max_value)
+        direction = pred.get("direction")
+        if direction != expected:
+            errors.append(
+                f"next_bar_prediction.direction: expected '{expected}' (argmax of probabilities), "
+                f"got {direction!r}"
+            )
+
+        return errors
 
     @staticmethod
     def _check_signal_chain(obj: dict, kline_frame: Any = None) -> list[str]:

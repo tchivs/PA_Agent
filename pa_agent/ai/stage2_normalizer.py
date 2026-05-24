@@ -10,6 +10,63 @@ from pa_agent.ai.trace_normalize import normalize_stage2_traces
 logger = logging.getLogger(__name__)
 
 
+def _normalize_next_bar_prediction(prediction: dict[str, Any]) -> None:
+    """In-place normalize next_bar_prediction common model quirks. Idempotent."""
+    if not isinstance(prediction, dict):
+        return
+
+    # 1. unpredictable fallback
+    unpredictable = bool(prediction.get("unpredictable", False))
+    prediction["unpredictable"] = unpredictable
+
+    # 2. features_used: ensure list, dedup, minimum set
+    feats = prediction.get("features_used")
+    if not isinstance(feats, list):
+        feats = []
+    feats = [f for f in feats if isinstance(f, str)]
+    if "stage1_diagnosis" not in feats:
+        feats.insert(0, "stage1_diagnosis")
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for f in feats:
+        if f not in seen:
+            deduped.append(f)
+            seen.add(f)
+    prediction["features_used"] = deduped
+
+    # 3. reasoning truncation (R7.6)
+    reasoning = prediction.get("reasoning")
+    if isinstance(reasoning, str) and len(reasoning) > 1500:
+        prediction["reasoning"] = reasoning[:1499] + "…"
+    elif not isinstance(reasoning, str):
+        prediction["reasoning"] = ""
+
+    if unpredictable:
+        # unpredictable → force direction / probabilities = null
+        prediction["direction"] = None
+        prediction["probabilities"] = None
+        return
+
+    # 4. probabilities integer rounding (R3.1)
+    probs = prediction.get("probabilities")
+    if isinstance(probs, dict):
+        normalized: dict[str, int] = {}
+        for key in ("bullish", "bearish", "neutral"):
+            raw = probs.get(key)
+            try:
+                value = int(round(float(raw))) if raw is not None else 0
+            except (TypeError, ValueError):
+                value = 0
+            normalized[key] = max(0, min(100, value))
+        prediction["probabilities"] = normalized
+
+        # 5. direction = argmax (R3.3, break ties by literal order)
+        order = ("bullish", "bearish", "neutral")
+        max_value = max(normalized[k] for k in order)
+        prediction["direction"] = next(k for k in order if normalized[k] == max_value)
+    # else: unparseable probabilities with unpredictable=False — leave for validator
+
+
 def normalize_stage2(obj: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of *obj* with decision_trace quirks corrected."""
     out = copy.deepcopy(obj)
@@ -41,4 +98,10 @@ def normalize_stage2(obj: dict[str, Any]) -> dict[str, Any]:
                 entry_bar.setdefault("freshness", "pending")
                 if entry_bar.get("follow_through") in (None, "", "pending"):
                     entry_bar["follow_through"] = "pending"
+
+    # Next bar prediction normalization (R8.6: only when field exists)
+    pred = out.get("next_bar_prediction")
+    if isinstance(pred, dict):
+        _normalize_next_bar_prediction(pred)
+
     return out

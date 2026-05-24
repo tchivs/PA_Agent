@@ -45,6 +45,17 @@ _LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 
 _THIRD_PARTY_LOGGERS = ("urllib3", "openai", "httpx")
 
+# tvdatafeed opens a websocket every refresh tick and logs at DEBUG — keep quiet
+_QUIET_LOGGER_NAMES = (
+    "urllib3",
+    "openai",
+    "httpx",
+    "tvDatafeed",
+    "tvDatafeed.main",
+    "root",  # tvdatafeed uses logging.getLogger("root") for websocket
+    "websocket",
+)
+
 
 def configure_logging(api_key: str = "") -> None:
     """Configure the root logger with rotating file handler and console handler.
@@ -79,8 +90,9 @@ def configure_logging(api_key: str = "") -> None:
     )
     file_handler.setFormatter(file_formatter)
 
-    # Console (stream) handler
+    # Console (stream) handler — INFO+ only; file keeps DEBUG for troubleshooting
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(console_formatter)
 
     handlers: list[logging.Handler] = [file_handler, console_handler]
@@ -104,7 +116,15 @@ def configure_logging(api_key: str = "") -> None:
         # Prevent double-logging via root propagation
         tp_logger.propagate = False
 
+    _silence_noisy_libraries()
+
     _configured = True
+
+
+def _silence_noisy_libraries() -> None:
+    """Turn down chatty third-party DEBUG loggers (tvdatafeed websocket spam)."""
+    for name in _QUIET_LOGGER_NAMES:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def update_api_key(new_key: str) -> None:

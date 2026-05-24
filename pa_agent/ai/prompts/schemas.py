@@ -123,7 +123,11 @@ _BAR_BY_BAR_ITEM: dict = {
         "bar": {"type": "string"},
         "role": {
             "type": "string",
-            "enum": ["structure", "signal", "entry", "confirmation", "noise", "trap", "climax", "test"],
+            "enum": [
+                "structure", "signal", "entry", "confirmation",
+                "noise", "trap", "climax", "test",
+                "trend_bull", "trend_bear",
+            ],
         },
         "bar_type": {
             "type": "string",
@@ -344,6 +348,76 @@ _DECISION_BASE: dict = {
     "additionalProperties": True,
 }
 
+# ── Next bar prediction sub-schemas (R2.1, R2.2) ──────────────────────────────
+
+_NEXT_BAR_PROBABILITIES: dict = {
+    "type": ["object", "null"],
+    "required": ["bullish", "bearish", "neutral"],
+    "properties": {
+        "bullish": {"type": "integer", "minimum": 0, "maximum": 100},
+        "bearish": {"type": "integer", "minimum": 0, "maximum": 100},
+        "neutral": {"type": "integer", "minimum": 0, "maximum": 100},
+    },
+    "additionalProperties": False,
+}
+
+_NEXT_BAR_PREDICTION: dict = {
+    "type": "object",
+    "required": ["direction", "probabilities", "reasoning", "unpredictable", "features_used"],
+    "properties": {
+        "direction": {
+            "type": ["string", "null"],
+            "enum": ["bullish", "bearish", "neutral", None],
+        },
+        "probabilities": _NEXT_BAR_PROBABILITIES,
+        "reasoning": {"type": "string", "minLength": 1, "maxLength": 1500},
+        "unpredictable": {"type": "boolean"},
+        "features_used": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "stage1_diagnosis",
+                    "kline_features",
+                    "analysis_history",
+                    "experience_library",
+                    "stage2_decision",
+                ],
+            },
+            "uniqueItems": True,
+        },
+    },
+    "allOf": [
+        # unpredictable=false → direction must be non-null string, probabilities must be object
+        {
+            "if": {
+                "properties": {"unpredictable": {"const": False}},
+                "required": ["unpredictable"],
+            },
+            "then": {
+                "properties": {
+                    "direction": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+                    "probabilities": {"type": "object"},
+                },
+            },
+        },
+        # unpredictable=true → direction=null, probabilities=null
+        {
+            "if": {
+                "properties": {"unpredictable": {"const": True}},
+                "required": ["unpredictable"],
+            },
+            "then": {
+                "properties": {
+                    "direction": {"type": "null"},
+                    "probabilities": {"type": "null"},
+                },
+            },
+        },
+    ],
+    "additionalProperties": False,
+}
+
 STAGE2_SCHEMA: dict = {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "type": "object",
@@ -366,6 +440,7 @@ STAGE2_SCHEMA: dict = {
         "terminal": _TERMINAL,
         "bar_analysis": _BAR_ANALYSIS,
         "gate_shortcircuited": {"type": "boolean"},
+        "next_bar_prediction": _NEXT_BAR_PREDICTION,
     },
     "additionalProperties": True,
 }

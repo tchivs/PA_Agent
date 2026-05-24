@@ -101,14 +101,26 @@ class SettingsDialog(QDialog):
         general_group = QGroupBox("通用设置")
         general_form = QFormLayout(general_group)
 
-        self._default_bar_count_spin = QSpinBox()
-        self._default_bar_count_spin.setRange(2, 5_000)
-        general_form.addRow("默认 Bar 数量:", self._default_bar_count_spin)
+        self._analysis_bar_count_spin = QSpinBox()
+        self._analysis_bar_count_spin.setRange(2, 5_000)
+        self._analysis_bar_count_spin.setToolTip(
+            "提交 AI 分析时使用的已收盘 K 线根数（不含当前未收盘 K 线）。"
+            "图表实时刷新也会按此数量拉取显示。"
+        )
+        general_form.addRow("用于分析的 K 线数量:", self._analysis_bar_count_spin)
 
         self._refresh_interval_spin = QSpinBox()
         self._refresh_interval_spin.setRange(100, 10_000)
         self._refresh_interval_spin.setSuffix(" ms")
         general_form.addRow("刷新间隔:", self._refresh_interval_spin)
+
+        self._auto_resume_chart_check = QCheckBox("分析完成后自动恢复「图表实时更新」")
+        self._auto_resume_chart_check.setToolTip(
+            "提交分析时图表会暂停刷新并冻结为已收盘 K 线；"
+            "勾选后，分析结束（成功或校验失败但流程已跑完）将自动恢复实时刷新，"
+            "并重新显示最右侧未收盘空心 K 线。演示模式不受影响。"
+        )
+        general_form.addRow("图表:", self._auto_resume_chart_check)
 
         self._context_warning_spin = QSpinBox()
         self._context_warning_spin.setRange(1, 100)
@@ -209,8 +221,11 @@ class SettingsDialog(QDialog):
             self._reasoning_effort_combo.setCurrentIndex(idx)
 
         self._context_window_spin.setValue(p.context_window)
-        self._default_bar_count_spin.setValue(g.default_bar_count)
+        self._analysis_bar_count_spin.setValue(g.analysis_bar_count)
         self._refresh_interval_spin.setValue(g.refresh_interval_ms)
+        self._auto_resume_chart_check.setChecked(
+            bool(getattr(g, "auto_resume_chart_after_analysis", True))
+        )
         self._context_warning_spin.setValue(int(g.context_warning_threshold_pct))
         self._stream_font_spin.setValue(int(getattr(g, "stream_pane_font_pt", 11)))
         self._chart_seq_font_spin.setValue(int(getattr(g, "chart_seq_label_font_pt", 7)))
@@ -272,8 +287,9 @@ class SettingsDialog(QDialog):
         p.reasoning_effort = self._reasoning_effort_combo.currentText()  # type: ignore[assignment]
         p.context_window = self._context_window_spin.value()
 
-        g.default_bar_count = self._default_bar_count_spin.value()
+        g.analysis_bar_count = self._analysis_bar_count_spin.value()
         g.refresh_interval_ms = self._refresh_interval_spin.value()
+        g.auto_resume_chart_after_analysis = self._auto_resume_chart_check.isChecked()
         g.context_warning_threshold_pct = float(self._context_warning_spin.value())
         g.stream_pane_font_pt = self._stream_font_spin.value()
         g.chart_seq_label_font_pt = self._chart_seq_font_spin.value()

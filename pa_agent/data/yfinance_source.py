@@ -9,8 +9,6 @@ Note: yfinance data has ~15 min delay for futures. Intraday data
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timezone
 
 from pa_agent.data.base import (
     DataSource,
@@ -197,15 +195,6 @@ def _resample_4h(df):
 
 
 def _row_ts_ms(row) -> int:
-    """Extract Unix timestamp in milliseconds from a yfinance DataFrame row."""
-    # After reset_index(), the datetime column is named 'Datetime' or 'Date'
+    """Extract bar open time in milliseconds from a yfinance DataFrame row."""
     dt = getattr(row, "Datetime", None) or getattr(row, "Date", None)
-    if dt is None:
-        return int(time.time() * 1000)
-    if hasattr(dt, "timestamp"):
-        return int(dt.timestamp() * 1000)
-    try:
-        return int(datetime.fromisoformat(str(dt))
-                   .replace(tzinfo=timezone.utc).timestamp() * 1000)
-    except Exception:
-        return int(time.time() * 1000)
+    return datetime_to_ts_ms(dt)

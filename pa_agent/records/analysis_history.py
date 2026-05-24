@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from pa_agent.config.paths import RECORDS_PENDING_DIR
+from pa_agent.data.datetime_ts import format_epoch_for_display
 from pa_agent.data.base import KlineFrame
 from pa_agent.records.schema import AnalysisRecord
 
@@ -28,9 +28,8 @@ def _normalize_ts(value: object) -> float:
 
 
 def format_bar_ts(ts_open: float) -> str:
-    """Format bar open time for logs/UI (local time)."""
-    sec = _normalize_ts(ts_open)
-    return datetime.fromtimestamp(sec).strftime("%Y-%m-%d %H:%M:%S")
+    """Format bar open time for logs/UI (server-time epoch, no local TZ shift)."""
+    return format_epoch_for_display(ts_open, short=False)
 
 
 def list_record_paths(directory: Path | None = None) -> list[Path]:

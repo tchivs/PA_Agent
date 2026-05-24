@@ -34,6 +34,9 @@ _BAR_ROLE_ALIASES: dict[str, str] = {
     "failure": "trap",
     "failed": "trap",
     "exhaustion": "climax",
+    "trend": "trend_bull",  # ambiguous → default bullish
+    "趋势阳线": "trend_bull",
+    "趋势阴线": "trend_bear",
     "延续": "confirmation",
     "跟随": "confirmation",
     "确认": "confirmation",

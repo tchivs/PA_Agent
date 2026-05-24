@@ -78,12 +78,15 @@ class RefreshLoop(QThread):
                 self.frame_ready.emit(bars)
 
             except DataSourceTransientError as exc:
-                logger.warning("RefreshLoop transient error: %s", exc)
+                logger.debug("RefreshLoop transient error: %s", exc)
                 self._consecutive_failures += 1
                 if failure_start is None:
                     failure_start = time.monotonic()
+                user_msg = str(exc).strip()
+                if user_msg:
+                    self.status_changed.emit(user_msg)
                 elapsed = time.monotonic() - failure_start
-                if elapsed >= self._failure_threshold_s:
+                if elapsed >= self._failure_threshold_s and not user_msg:
                     self.status_changed.emit("数据延迟")
             except Exception as exc:  # noqa: BLE001
                 # Never let unexpected exceptions bubble out of the thread

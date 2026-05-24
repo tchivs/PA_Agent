@@ -23,10 +23,20 @@ class SeqLabelItem(pg.TextItem):
 
     _COLOR = QColor(180, 180, 180)  # light grey — unobtrusive
 
-    def __init__(self, seq: int, x_pos: int, y_pos: float, *, font_pt: int = 7) -> None:
+    def __init__(
+        self,
+        seq: int,
+        x_pos: int,
+        y_pos: float,
+        *,
+        font_pt: int = 7,
+        forming: bool = False,
+    ) -> None:
+        label = f"#{seq}" if not forming else f"#{seq}"
+        color = QColor(120, 200, 220, 200) if forming else self._COLOR
         super().__init__(
-            text=f"#{seq}",
-            color=self._COLOR,
+            text=label,
+            color=color,
             anchor=(0.5, 1.0),  # horizontally centred, bottom of text at y_pos
         )
         self.setFont(QFont("Arial", font_pt))

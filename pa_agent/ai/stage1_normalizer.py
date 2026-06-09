@@ -55,6 +55,16 @@ _BAR_ROLE_ALIASES: dict[str, str] = {
 }
 
 # Model often omits the trailing "s" on strengthens_* / weakens_*.
+# Model often uses "low" as a synonym for "weak" in signal_bar.quality.
+_SIGNAL_BAR_QUALITY_ALIASES: dict[str, str] = {
+    "low": "weak",
+    "high": "strong",
+    "moderate": "medium",
+    "poor": "weak",
+    "good": "strong",
+    "bad": "invalid",
+}
+
 _CONTEXT_EFFECT_ALIASES: dict[str, str] = {
     "strengthen_bull": "strengthens_bull",
     "strengthen_bear": "strengthens_bear",
@@ -138,6 +148,24 @@ def _normalize_bar_by_bar_context_effects(out: dict[str, Any]) -> None:
                 effect,
                 normalized,
             )
+
+
+def _normalize_signal_bar_quality(out: dict[str, Any]) -> None:
+    """Normalize signal_bar.quality to valid enum values."""
+    bar_analysis = out.get("bar_analysis")
+    if not isinstance(bar_analysis, dict):
+        return
+    signal_bar = bar_analysis.get("signal_bar")
+    if not isinstance(signal_bar, dict):
+        return
+    quality = signal_bar.get("quality")
+    if not isinstance(quality, str):
+        return
+    key = quality.strip().lower()
+    normalized = _SIGNAL_BAR_QUALITY_ALIASES.get(key)
+    if normalized and normalized != quality:
+        signal_bar["quality"] = normalized
+        logger.debug("Mapped signal_bar.quality %r -> %s", quality, normalized)
 
 
 def _summary_bar_seq(bar_label: object) -> int | None:
@@ -347,6 +375,7 @@ def normalize_stage1(
     normalize_stage1_traces(out, normalization_mode=normalization_mode)
     _normalize_bar_by_bar_roles(out)
     _normalize_bar_by_bar_context_effects(out)
+    _normalize_signal_bar_quality(out)
     _pad_bar_by_bar_summary_to_minimum(out, kline_frame=kline_frame)
     _fill_incremental_delta(
         out,

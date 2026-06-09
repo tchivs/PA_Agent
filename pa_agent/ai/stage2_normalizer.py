@@ -25,6 +25,17 @@ _NO_ORDER_PRICE_FIELDS = (
     "entry_rule",
 )
 
+# Valid enum values for features_used in next_bar_prediction / next_cycle_prediction.
+# Must stay in sync with schemas.py _NEXT_BAR_PREDICTION / _NEXT_CYCLE_PREDICTION.
+_VALID_FEATURES_USED = frozenset({
+    "stage1_diagnosis",
+    "kline_features",
+    "analysis_history",
+    "experience_library",
+    "stage2_decision",
+    "previous_prediction_summary",
+})
+
 
 def _trace_node_answer(trace: Any, node_id: str) -> str | None:
     if not isinstance(trace, list):
@@ -227,11 +238,19 @@ def _normalize_next_cycle_prediction(prediction: dict[str, Any]) -> None:
     unpredictable = bool(prediction.get("unpredictable", False))
     prediction["unpredictable"] = unpredictable
 
-    # 2. features_used: ensure list, dedup, minimum set
+    # 2. features_used: ensure list, dedup, minimum set, filter invalid values
     feats = prediction.get("features_used")
     if not isinstance(feats, list):
         feats = []
     feats = [f for f in feats if isinstance(f, str)]
+    # Filter out values not in the schema enum (e.g. "detected_patterns")
+    invalid_feats = [f for f in feats if f not in _VALID_FEATURES_USED]
+    if invalid_feats:
+        logger.debug(
+            "next_cycle_prediction.features_used dropped invalid values: %s",
+            invalid_feats,
+        )
+    feats = [f for f in feats if f in _VALID_FEATURES_USED]
     if "stage1_diagnosis" not in feats:
         feats.insert(0, "stage1_diagnosis")
     seen: set[str] = set()
@@ -314,11 +333,19 @@ def _normalize_next_bar_prediction(prediction: dict[str, Any]) -> None:
     unpredictable = bool(prediction.get("unpredictable", False))
     prediction["unpredictable"] = unpredictable
 
-    # 2. features_used: ensure list, dedup, minimum set
+    # 2. features_used: ensure list, dedup, minimum set, filter invalid values
     feats = prediction.get("features_used")
     if not isinstance(feats, list):
         feats = []
     feats = [f for f in feats if isinstance(f, str)]
+    # Filter out values not in the schema enum (e.g. "detected_patterns")
+    invalid_feats = [f for f in feats if f not in _VALID_FEATURES_USED]
+    if invalid_feats:
+        logger.debug(
+            "next_bar_prediction.features_used dropped invalid values: %s",
+            invalid_feats,
+        )
+    feats = [f for f in feats if f in _VALID_FEATURES_USED]
     if "stage1_diagnosis" not in feats:
         feats.insert(0, "stage1_diagnosis")
     seen: set[str] = set()

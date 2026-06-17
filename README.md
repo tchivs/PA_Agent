@@ -36,14 +36,18 @@
 
 ## 快速开始
 
+直接在系统中安装（推荐部署在本机）：
+
 ```cmd
-python -m venv .venv
-.venv\Scripts\activate
 pip install -e ".[dev]"
 python -m pa_agent.main
 ```
 
 首次启动后在**设置**中填写 **Base URL**、**模型名** 与 **API Key**。
+
+> 如需隔离环境也可创建虚拟环境：`python -m venv .venv` 后激活再 `pip install`。
+
+**安装内容**：PyQt6（GUI 框架）+ pyqtgraph（K 线图表绘图）+ numpy/pandas（数据处理）+ openai（AI API 客户端）+ json 校验、模型定义等全套依赖。
 
 ---
 

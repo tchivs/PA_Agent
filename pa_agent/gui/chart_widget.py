@@ -62,7 +62,7 @@ class ChartWidget(pg.PlotWidget):
         self._sr_items: list[pg.GraphicsItem] = []  # support/resistance level lines
         self._pending_decision: dict | None = None
         self._direction_items: list[pg.GraphicsItem] = []
-        self._seq_label_font_pt: int = 7
+        self._seq_label_font_pt: int = 11
         self._fit_on_next_render: bool = False
         self._first_frame_fitted: bool = False
 

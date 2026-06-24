@@ -81,7 +81,7 @@ class GeneralSettings(BaseModel):
     #: 「实时」页思考过程/撰写回答框与追问输入框的等宽字体字号（pt）
     stream_pane_font_pt: int = Field(default=11, ge=8, le=28)
     #: K 线图上 #序号 标签的字号（pt）
-    chart_seq_label_font_pt: int = Field(default=7, ge=6, le=24)
+    chart_seq_label_font_pt: int = Field(default=11, ge=6, le=24)
     #: 两阶段分析结束后是否自动恢复 K 线图表实时刷新
     auto_resume_chart_after_analysis: bool = False
     #: 持续跟踪分析：有新K线收盘时自动触发新一轮分析

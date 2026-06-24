@@ -238,7 +238,7 @@ class GeneralSettingsDialog(QDialog):
         )
         self._context_warning_spin.setValue(int(g.context_warning_threshold_pct))
         self._stream_font_spin.setValue(int(getattr(g, "stream_pane_font_pt", 11)))
-        self._chart_seq_font_spin.setValue(int(getattr(g, "chart_seq_label_font_pt", 7)))
+        self._chart_seq_font_spin.setValue(int(getattr(g, "chart_seq_label_font_pt", 11)))
 
         self._flow_auto_play_check.setChecked(
             getattr(g, "decision_flow_auto_play", False)

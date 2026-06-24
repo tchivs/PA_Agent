@@ -22,7 +22,7 @@
     "structure_flip_cooldown_bars": 3,
     "decision_flow_default_zoom_pct": 600,
     "stream_pane_font_pt": 11,
-    "chart_seq_label_font_pt": 7,
+    "chart_seq_label_font_pt": 11,
     "auto_resume_chart_after_analysis": true,
     "enable_next_bar_prediction": false
   },

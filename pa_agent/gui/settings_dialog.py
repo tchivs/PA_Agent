@@ -288,7 +288,7 @@ class SettingsDialog(QDialog):
         )
         self._context_warning_spin.setValue(int(g.context_warning_threshold_pct))
         self._stream_font_spin.setValue(int(getattr(g, "stream_pane_font_pt", 11)))
-        self._chart_seq_font_spin.setValue(int(getattr(g, "chart_seq_label_font_pt", 7)))
+        self._chart_seq_font_spin.setValue(int(getattr(g, "chart_seq_label_font_pt", 11)))
         self._incremental_max_new_bars_spin.setValue(
             int(getattr(g, "incremental_max_new_bars", 10))
         )

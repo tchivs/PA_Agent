@@ -3765,6 +3765,7 @@ class MainWindow(QMainWindow):
         has_path = False
         if flow_viz is not None:
             has_path = bool(flow_viz.set_trace(**trace_kw))
+            flow_viz.schedule_refit_view(delay_ms=150)
         if has_path and flow_viz is not None:
             decision_inner = stage2_full.get("decision")
             skip_flow_viz = (
@@ -3916,6 +3917,7 @@ class MainWindow(QMainWindow):
         if not force_play and not flow_viz.should_auto_play_after_load():
             return
         sidebar.focus_decision_flow_viz()
+        flow_viz.schedule_refit_view(delay_ms=0)
         QTimer.singleShot(120, flow_viz.play_path)
 
     def _on_worker_done(self) -> None:
@@ -4085,11 +4087,12 @@ class MainWindow(QMainWindow):
         settings = getattr(self._ctx, "settings", None)
         if chart is not None and settings is not None:
             chart.set_seq_label_font_pt(
-                int(getattr(settings.general, "chart_seq_label_font_pt", 7) or 7)
+                int(getattr(settings.general, "chart_seq_label_font_pt", 11) or 11)
             )
         flow_viz = getattr(self, "_decision_flow_viz_panel", None)
         if flow_viz is not None:
             flow_viz.refit_view()
+            flow_viz.schedule_refit_view()
 
     def _update_ai_mode_label(self) -> None:
         """Show current thinking / reasoning_effort / model in the toolbar."""

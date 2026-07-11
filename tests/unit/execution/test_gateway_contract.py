@@ -12,12 +12,14 @@ from pa_agent.trading.domain.models import (
     GatewayCapabilities,
     GatewayEvidence,
     OrderProjection,
+    OrderState,
     ProductType,
     QuoteObservation,
     RuleObservation,
     TimeObservation,
 )
 from pa_agent.trading.ports.gateway import TradingGateway
+from pa_agent.trading.ports.ledger import ExecutionLedger, SubmissionAdmission
 
 
 def test_trading_gateway_exposes_the_complete_canonical_operation_surface() -> None:
@@ -87,3 +89,62 @@ def test_trading_gateway_annotations_are_canonical_and_venue_neutral() -> None:
         assert "payload" not in rendered
 
     assert signature(TradingGateway.submit_order).return_annotation != signature(TradingGateway.submit_order).empty
+
+
+def test_submission_admission_is_an_atomic_explicit_claim_result() -> None:
+    """One ledger call exposes the decision and every identity a coordinator needs."""
+    hints = get_type_hints(ExecutionLedger.create_or_load_and_claim_submission)
+
+    assert hints == {"command": ExecutionCommand, "return": SubmissionAdmission}
+    assert "create_or_load_and_claim_submission" in ExecutionLedger.__dict__
+
+    admission = SubmissionAdmission(
+        command_id="command-first",
+        client_order_id="client-first",
+        reconciliation_job_id="job-first",
+        lifecycle_state=OrderState.SUBMITTING,
+        is_admissible=True,
+        claim_token="opaque-first-claim",
+    )
+
+    assert admission.is_admissible
+    assert admission.claim_token == "opaque-first-claim"
+
+
+def test_non_admissible_submission_admission_retains_first_identities_without_claim() -> None:
+    """A duplicate unresolved command is recoverable but cannot obtain another submit claim."""
+    existing = SubmissionAdmission(
+        command_id="command-first",
+        client_order_id="client-first",
+        reconciliation_job_id="job-first",
+        lifecycle_state=OrderState.SUBMISSION_UNKNOWN,
+        is_admissible=False,
+        claim_token=None,
+    )
+
+    assert not existing.is_admissible
+    assert existing.command_id == "command-first"
+    assert existing.client_order_id == "client-first"
+    assert existing.reconciliation_job_id == "job-first"
+    assert existing.lifecycle_state is OrderState.SUBMISSION_UNKNOWN
+    assert existing.claim_token is None
+
+    with pytest.raises(ValueError):
+        SubmissionAdmission(
+            command_id="command-first",
+            client_order_id="client-first",
+            reconciliation_job_id="job-first",
+            lifecycle_state=OrderState.SUBMISSION_UNKNOWN,
+            is_admissible=False,
+            claim_token="second-claim-is-invalid",
+        )
+
+
+def test_admission_contract_requires_claim_before_gateway_submission_and_identity_recovery() -> None:
+    """Future coordinators are constrained to one claim and persisted recovery identities."""
+    gateway_contract = TradingGateway.submit_order.__doc__ or ""
+    ledger_contract = ExecutionLedger.mark_submission_ambiguous.__doc__ or ""
+
+    assert "admissible claim" in gateway_contract
+    assert "same persisted identities" in ledger_contract
+    assert "reconciliation" in ledger_contract

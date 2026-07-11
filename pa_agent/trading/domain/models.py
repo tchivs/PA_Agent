@@ -7,7 +7,11 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum, StrEnum
 from typing import Any, TypeAlias
 
-from pa_agent.trading.domain.errors import DecimalValueError, ProductContextError
+from pa_agent.trading.domain.errors import (
+    CanonicalInputError,
+    DecimalValueError,
+    ProductContextError,
+)
 
 
 class ProductType(StrEnum):
@@ -112,6 +116,11 @@ def _require_aware(value: datetime, name: str) -> None:
         raise ValueError(f"{name} must be timezone-aware")
 
 
+def _require_nonnegative(instance: object, name: str) -> None:
+    if getattr(instance, name) < 0:
+        raise CanonicalInputError(f"{name} must be non-negative")
+
+
 @dataclass(frozen=True)
 class SpotOrderContext:
     """Spot order context, deliberately without leverage or borrowing fields."""
@@ -164,9 +173,26 @@ class UsdtPerpetualOrderContext:
 ProductContext: TypeAlias = SpotOrderContext | IsolatedMarginOrderContext | UsdtPerpetualOrderContext
 
 
+_PRODUCT_CONTEXT_TYPES = {
+    SpotOrderContext: ProductType.SPOT,
+    IsolatedMarginOrderContext: ProductType.ISOLATED_MARGIN,
+    UsdtPerpetualOrderContext: ProductType.USDT_PERPETUAL,
+}
+
+
+def _require_product_context(value: object) -> None:
+    expected_product = _PRODUCT_CONTEXT_TYPES.get(type(value))
+    if expected_product is None or value.product is not expected_product:
+        raise CanonicalInputError("command context must be a matching canonical product context")
+
+
 @dataclass(frozen=True)
 class ExecutionCommand:
-    """Immutable operator-approved canonical order command before gateway execution."""
+    """Immutable canonical command before gateway execution.
+
+    ``client_order_id`` remains a non-authoritative caller candidate until the
+    ledger allocates one durable identity; it is never a submission authority.
+    """
 
     command_id: str
     logical_command_key: str
@@ -181,8 +207,23 @@ class ExecutionCommand:
     price: Decimal | str | None = None
 
     def __post_init__(self) -> None:
-        if not all((self.command_id, self.logical_command_key, self.client_order_id, self.account_id, self.symbol)):
+        if not all(
+            (
+                self.command_id,
+                self.logical_command_key,
+                self.client_order_id,
+                self.account_id,
+                self.symbol,
+            )
+        ):
             raise ValueError("command identifiers, account_id, and symbol are required")
+        if type(self.mode) is not Mode:
+            raise CanonicalInputError("mode must be a Mode instance")
+        if type(self.side) is not Side:
+            raise CanonicalInputError("side must be a Side instance")
+        if type(self.order_type) is not OrderType:
+            raise CanonicalInputError("order_type must be an OrderType instance")
+        _require_product_context(self.context)
         _decimal_field(self, "quantity")
         _require_positive(self, "quantity")
         _optional_decimal_field(self, "price")
@@ -275,6 +316,8 @@ class InstrumentRules:
             _decimal_field(self, name)
         _require_positive(self, "price_tick")
         _require_positive(self, "quantity_step")
+        _require_nonnegative(self, "minimum_quantity")
+        _require_nonnegative(self, "minimum_notional")
 
 
 @dataclass(frozen=True)
@@ -305,13 +348,25 @@ class GatewayCapabilities:
 
 @dataclass(frozen=True)
 class AccountObservation:
-    """Timestamped account observation without venue payload leakage."""
+    """Typed timestamped account evidence without venue payload leakage."""
 
     account_id: str
     product: ProductType
     observed_at: datetime
+    balances: tuple[Balance, ...] = ()
+    positions: tuple[Position, ...] = ()
 
     def __post_init__(self) -> None:
+        if not self.account_id:
+            raise CanonicalInputError("account_id is required")
+        if type(self.product) is not ProductType:
+            raise CanonicalInputError("product must be a ProductType instance")
+        if type(self.balances) is not tuple or type(self.positions) is not tuple:
+            raise CanonicalInputError("account records must use immutable tuples")
+        if any(type(balance) is not Balance for balance in self.balances):
+            raise CanonicalInputError("balances must contain only canonical Balance values")
+        if any(type(position) is not Position for position in self.positions):
+            raise CanonicalInputError("positions must contain only canonical Position values")
         _require_aware(self.observed_at, "observed_at")
 
 
@@ -368,14 +423,20 @@ class GatewayEvidence:
     def __post_init__(self) -> None:
         if not self.evidence_id or not self.client_order_id:
             raise ValueError("evidence_id and client_order_id are required")
+        if type(self.state) is not OrderState:
+            raise CanonicalInputError("state must be an OrderState instance")
         _optional_decimal_field(self, "filled_quantity")
         _optional_decimal_field(self, "average_fill_price")
         _require_aware(self.observed_at, "observed_at")
-        if self.state is OrderState.FILLED:
+        if self.state in {OrderState.PARTIALLY_FILLED, OrderState.FILLED}:
             if self.filled_quantity is None or self.average_fill_price is None:
-                raise ValueError("filled evidence requires quantity and average fill price")
-            _require_positive(self, "filled_quantity")
-            _require_positive(self, "average_fill_price")
+                raise CanonicalInputError(
+                    "partial and filled evidence require quantity and average fill price"
+                )
+            if self.filled_quantity <= 0 or self.average_fill_price <= 0:
+                raise CanonicalInputError(
+                    "partial and filled evidence require positive fill values"
+                )
 
 
 def canonicalize(value: Any) -> Any:

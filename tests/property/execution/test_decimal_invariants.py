@@ -8,10 +8,11 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from pa_agent.trading.domain.errors import LifecycleTransitionError
+from pa_agent.trading.domain.errors import CanonicalInputError, LifecycleTransitionError
 from pa_agent.trading.domain.lifecycle import assert_transition, is_terminal_state
 from pa_agent.trading.domain.models import (
     GatewayEvidence,
+    InstrumentRules,
     LifecycleEvent,
     OrderState,
     decimal_from_canonical,
@@ -76,3 +77,21 @@ def test_terminal_events_require_matching_normalized_evidence(state: OrderState)
     )
     if state is OrderState.OPEN:
         assert assert_transition(state, LifecycleEvent.FILL_OBSERVED, evidence=evidence) is OrderState.FILLED
+
+
+@given(
+    minimum_field=st.sampled_from(("minimum_quantity", "minimum_notional")),
+    negative_minimum=st.integers(min_value=1, max_value=10_000).map(
+        lambda value: -Decimal(value) / Decimal("1000")
+    ),
+)
+def test_negative_rule_minima_are_rejected_without_weakening_decimal_ingress(
+    minimum_field: str, negative_minimum: Decimal
+) -> None:
+    with pytest.raises(CanonicalInputError):
+        InstrumentRules(
+            symbol="BTCUSDT",
+            price_tick="0.01",
+            quantity_step="0.001",
+            **{minimum_field: negative_minimum},
+        )

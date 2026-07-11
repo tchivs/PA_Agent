@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from pa_agent.trading.domain.models import (
+    AccountObservation,
     ExecutionCommand,
     GatewayEvidence,
     LifecycleEvent,
@@ -25,11 +26,12 @@ _NONTERMINAL_SUBMISSION_STATES = frozenset(
 
 @dataclass(frozen=True)
 class SubmissionAdmission:
-    """The sole durable authority result for one logical command submission.
+    """Durable admission result for one logical command submission.
 
-    An admissible result carries one opaque claim token. A non-admissible result
-    returns the already-persisted first identities without a claim, so a caller
-    can recover evidence but cannot make a second remote submission.
+    The first admission discards the caller candidate and allocates one opaque
+    durable client-order ID. A non-admissible result returns the already
+    persisted identities without a claim, so callers can recover evidence but
+    cannot make a second remote submission.
     """
 
     command_id: str
@@ -51,6 +53,37 @@ class SubmissionAdmission:
                 raise ValueError("an admissible submission requires an opaque claim token")
         elif self.claim_token is not None:
             raise ValueError("a non-admissible submission cannot carry a claim token")
+
+
+@dataclass(frozen=True)
+class OutboundSubmission:
+    """Irreversible ledger authorization for exactly one future gateway call.
+
+    The ledger reconstructs ``command`` from its durable canonical record and
+    binds it to the generated client-order ID. The opaque attempt token exists
+    only after atomic consumption of an admissible submission claim.
+    """
+
+    command: ExecutionCommand
+    command_id: str
+    client_order_id: str
+    reconciliation_job_id: str
+    outbound_attempt_token: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.command_id,
+                self.client_order_id,
+                self.reconciliation_job_id,
+                self.outbound_attempt_token,
+            )
+        ):
+            raise ValueError("outbound submission requires durable identities and attempt token")
+        if self.command.command_id != self.command_id:
+            raise ValueError("outbound submission command must match its durable command ID")
+        if self.command.client_order_id != self.client_order_id:
+            raise ValueError("outbound submission command must use its generated client-order ID")
 
 
 @dataclass(frozen=True)
@@ -82,20 +115,29 @@ class ExecutionLedger(Protocol):
     def create_or_load_and_claim_submission(
         self, command: ExecutionCommand
     ) -> SubmissionAdmission:
-        """Atomically create or load ``command`` by logical key and decide admission.
+        """Atomically create or load a command and decide its initial admission.
 
-        The first unresolved logical command persists one command ID, client-order
-        ID, reconciliation job, and opaque claim before any gateway call. A repeat
-        returns those original identities as non-admissible and never allocates a
-        second claim token, command, client-order ID, or reconciliation job.
+        First admission discards the caller candidate, allocates one opaque
+        durable client-order ID, and persists the command, reconciliation job,
+        and opaque claim before any gateway call. A repeat and recovery return
+        exactly the stored ID without another claim, command, client-order ID,
+        or reconciliation job.
         """
-    def assert_submission_claim_is_live(self, admission: SubmissionAdmission) -> None:
-        """Fail closed unless ``admission`` still matches the live durable claim.
 
-        A future coordinator MUST call this immediately before every gateway
-        submission because an immutable admission object becomes stale when
-        ambiguity consumes its durable claim.
+    def begin_outbound_submission(
+        self, admission: SubmissionAdmission
+    ) -> OutboundSubmission:
+        """Consume one admission in an atomic durable state change.
+
+        The operation reconstructs the command from durable canonical storage,
+        starts its one irreversible outbound attempt, and returns its generated
+        client-order ID. Later local ambiguity or cancellation may record
+        reconciliation work but cannot revoke this authorization; a second begin
+        request fails closed.
         """
+
+    def record_account_observation(self, observation: AccountObservation) -> str:
+        """Persist one explicit typed canonical account observation and return its ID."""
 
 
     def mark_submission_ambiguous(
@@ -104,7 +146,11 @@ class ExecutionLedger(Protocol):
         *,
         event: LifecycleEvent = LifecycleEvent.LOCAL_TIMEOUT,
     ) -> None:
-        """Record one local interruption; recovery retains the same persisted identities for reconciliation."""
+        """Record local ambiguity while retaining durable identities for reconciliation.
+
+        This cannot revoke an authorization already returned by
+        :meth:`begin_outbound_submission`.
+        """
 
     def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
         """Return persisted non-terminal jobs without allocating replacement identities."""

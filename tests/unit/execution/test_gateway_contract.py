@@ -27,7 +27,9 @@ from pa_agent.trading.ports.gateway import (
     TradingGateway,
     TradingGatewayError,
 )
-from pa_agent.trading.ports.ledger import ExecutionLedger, SubmissionAdmission
+from pa_agent.trading.ports import ExecutionLedger, OutboundSubmission
+from pa_agent.trading.ports.ledger import SubmissionAdmission
+from tests.fixtures.execution_factories import make_account_observation, make_spot_command
 
 
 def test_trading_gateway_exposes_the_complete_canonical_operation_surface() -> None:
@@ -70,7 +72,7 @@ def test_trading_gateway_annotations_are_canonical_and_venue_neutral() -> None:
             "product": ProductType,
             "return": AccountObservation,
         },
-        "submit_order": {"command": ExecutionCommand, "return": GatewayEvidence},
+        "submit_order": {"outbound": OutboundSubmission, "return": GatewayEvidence},
         "cancel_order": {"client_order_id": str, "return": GatewayEvidence},
         "lookup_order_by_client_id": {"client_order_id": str},
         "list_open_orders": {"account_id": str, "product": ProductType},
@@ -107,16 +109,20 @@ def test_gateway_failures_are_typed_trading_domain_errors() -> None:
 
 
 
-def test_submission_admission_is_an_atomic_explicit_claim_result() -> None:
-    """One ledger call exposes the decision and every identity a coordinator needs."""
+def test_submission_admission_discards_caller_identity_candidates() -> None:
+    """The ledger owns the only durable remote identity allocation boundary."""
     hints = get_type_hints(ExecutionLedger.create_or_load_and_claim_submission)
+    contract = ExecutionLedger.create_or_load_and_claim_submission.__doc__ or ""
 
     assert hints == {"command": ExecutionCommand, "return": SubmissionAdmission}
-    assert "create_or_load_and_claim_submission" in ExecutionLedger.__dict__
+    assert "caller candidate" in contract
+    assert "allocates one opaque" in contract
+    assert "durable client-order ID" in contract
+    assert "repeat and recovery" in contract
 
     admission = SubmissionAdmission(
         command_id="command-first",
-        client_order_id="client-first",
+        client_order_id="durable-client-first",
         reconciliation_job_id="job-first",
         lifecycle_state=OrderState.SUBMITTING,
         is_admissible=True,
@@ -124,56 +130,61 @@ def test_submission_admission_is_an_atomic_explicit_claim_result() -> None:
     )
 
     assert admission.is_admissible
-    assert admission.claim_token == "opaque-first-claim"
+    assert admission.client_order_id == "durable-client-first"
 
 
-
-def test_submission_claim_liveness_is_a_pre_submit_ledger_requirement() -> None:
-    """A stale immutable admission cannot authorize a future gateway retry."""
-    assert get_type_hints(ExecutionLedger.assert_submission_claim_is_live) == {
+def test_begin_outbound_submission_returns_irreversible_durable_authorization() -> None:
+    """An admissible claim is consumed into the only gateway submission authority."""
+    assert get_type_hints(ExecutionLedger.begin_outbound_submission) == {
         "admission": SubmissionAdmission,
-        "return": type(None),
+        "return": OutboundSubmission,
     }
-    claim_contract = ExecutionLedger.assert_submission_claim_is_live.__doc__ or ""
-    gateway_contract = TradingGateway.__doc__ or ""
+    contract = ExecutionLedger.begin_outbound_submission.__doc__ or ""
+    assert "atomic durable state change" in contract
+    assert "cannot revoke" in contract
+    assert "second begin" in contract
 
-    assert "immediately before every gateway" in claim_contract
-    assert "immediately before every call" in gateway_contract
-
-def test_non_admissible_submission_admission_retains_first_identities_without_claim() -> None:
-    """A duplicate unresolved command is recoverable but cannot obtain another submit claim."""
-    existing = SubmissionAdmission(
-        command_id="command-first",
-        client_order_id="client-first",
+    command = make_spot_command(client_order_id="durable-client-first")
+    outbound = OutboundSubmission(
+        command=command,
+        command_id=command.command_id,
+        client_order_id="durable-client-first",
         reconciliation_job_id="job-first",
-        lifecycle_state=OrderState.SUBMISSION_UNKNOWN,
-        is_admissible=False,
-        claim_token=None,
+        outbound_attempt_token="opaque-outbound-attempt",
     )
 
-    assert not existing.is_admissible
-    assert existing.command_id == "command-first"
-    assert existing.client_order_id == "client-first"
-    assert existing.reconciliation_job_id == "job-first"
-    assert existing.lifecycle_state is OrderState.SUBMISSION_UNKNOWN
-    assert existing.claim_token is None
-
+    assert outbound.command is command
+    assert outbound.client_order_id == "durable-client-first"
+    assert outbound.outbound_attempt_token == "opaque-outbound-attempt"
     with pytest.raises(ValueError):
-        SubmissionAdmission(
-            command_id="command-first",
-            client_order_id="client-first",
+        OutboundSubmission(
+            command=command,
+            command_id="replacement-command",
+            client_order_id="durable-client-first",
             reconciliation_job_id="job-first",
-            lifecycle_state=OrderState.SUBMISSION_UNKNOWN,
-            is_admissible=False,
-            claim_token="second-claim-is-invalid",
+            outbound_attempt_token="opaque-outbound-attempt",
         )
 
 
-def test_admission_contract_requires_claim_before_gateway_submission_and_identity_recovery() -> None:
-    """Future coordinators are constrained to one claim and persisted recovery identities."""
+def test_gateway_submission_requires_the_protected_outbound_authorization() -> None:
+    """An adapter accepts no free-floating command or separately checked claim."""
+    assert get_type_hints(TradingGateway.submit_order) == {
+        "outbound": OutboundSubmission,
+        "return": GatewayEvidence,
+    }
     gateway_contract = TradingGateway.submit_order.__doc__ or ""
-    ledger_contract = ExecutionLedger.mark_submission_ambiguous.__doc__ or ""
 
-    assert "admissible claim" in gateway_contract
-    assert "same persisted identities" in ledger_contract
-    assert "reconciliation" in ledger_contract
+    assert "irreversible" in gateway_contract
+    assert "ledger-created" in gateway_contract
+
+
+def test_ledger_observation_contract_is_explicitly_typed() -> None:
+    """The durable port accepts typed observations rather than arbitrary payload maps."""
+    assert get_type_hints(ExecutionLedger.record_account_observation) == {
+        "observation": AccountObservation,
+        "return": str,
+    }
+    assert "record_account_observation" in ExecutionLedger.__dict__
+
+    observation = make_account_observation()
+    assert observation.product is ProductType.SPOT

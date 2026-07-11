@@ -5,16 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: execution-foundation
 status: verifying
-stopped_at: Completed 01-05-PLAN.md
-last_updated: "2026-07-11T09:21:10.029Z"
+stopped_at: Completed 01-06-PLAN.md
+last_updated: "2026-07-11T10:58:10.681Z"
 last_activity: 2026-07-11
 last_activity_desc: Phase 01 execution started
 progress:
-  total_phases: 7
+  total_phases: 1
   completed_phases: 0
-  total_plans: 6
-  completed_plans: 5
-  percent: 0
+  total_plans: 9
+  completed_plans: 6
 ---
 
 # Project State
@@ -57,6 +56,7 @@ Progress: [████████░░] 80%
 | Phase 01 P03 | 8 min | 2 tasks | 8 files |
 | Phase 01 P04 | 10 min | 2 tasks | 8 files |
 | Phase 01 P05 | 4 min | 2 tasks | 6 files |
+| Phase 01 P06 | 5 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -74,6 +74,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - SQLite ledger initialization fails closed on storage/configuration failures and atomically admits exactly one unresolved submission claim before any gateway side effect.
 - Recovery performs only persisted client-ID evidence lookup; empty, contradictory, and out-of-order evidence cannot grant a second admission or trigger submission.
 - [Phase ?]: OrderValidationService.validate(command) is the sole public typed-command validation boundary and fetches exactly one fresh rule observation before internal Decimal checks.
+- [Phase ?]: Public execution ingress rejects raw enum/context shapes rather than normalizing untrusted inputs.
+- [Phase ?]: The ledger owns durable client-ID allocation and creates the irreversible authorization required by gateway submission.
 
 ### Pending Todos
 
@@ -94,6 +96,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-11T09:21:10.023Z
-Stopped at: Completed 01-05-PLAN.md
+Last session: 2026-07-11T10:58:10.673Z
+Stopped at: Completed 01-06-PLAN.md
 Resume file: None

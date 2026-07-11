@@ -6,7 +6,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 ## Phases
 
-- [x] **Phase 1: Execution Foundation** - Create the broker-neutral Decimal domain, durable SQLite lifecycle ledger, and recovery contract. (completed 2026-07-11)
+- [ ] **Phase 1: Execution Foundation** - Create the broker-neutral Decimal domain, durable SQLite lifecycle ledger, and recovery contract. (gap closure planned 2026-07-11)
 - [ ] **Phase 2: Approval And Risk Boundary** - Ensure advisory analysis can only become a durable, risk-accepted, operator-approved command.
 - [ ] **Phase 3: Paper Product Core** - Let operators execute and recover deterministic paper spot, isolated-margin, and USDT-perpetual flows.
 - [ ] **Phase 4: Local Trading Workspace** - Provide responsive PyQt configuration, approval, account-state, and kill-switch workflows.
@@ -30,9 +30,27 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/domain/`, `pa_agent/trading/ports/`, `pa_agent/trading/persistence/`, and test support under `tests/fixtures/`, `tests/unit/execution/`, `tests/property/execution/`, `tests/integration/execution/`; preserve the existing boundaries in `pa_agent/data/base.py` and `pa_agent/records/trade_logger.py`.
 **Key risks and gates**: SQLite schema/migration and single-writer behavior must be selected and tested before any gateway. All Decimal conversion happens at the gateway boundary. Stream gaps, timeouts, cancellation, and restart are reconciliation triggers, never terminal-state shortcuts.
-**Plans**: 5/5 plans complete
+**Plans**: 6/8 plans executed
 
 - [x] 01-05-PLAN.md
+
+**Gap closure plans**
+
+- [x] 01-06-PLAN.md — Enforce strict canonical ingress and publish durable identity/outbound contracts.
+- [ ] 01-07-PLAN.md — Implement generated IDs, durable fill projections, typed observations, and protected outbound authorization.
+- [ ] 01-08-PLAN.md — Serialize SQLite WAL/migration bootstrap and prove fresh/reopened concurrent initialization.
+
+**Gap Closure Wave 6** *(blocked on 01-05 completion)*
+
+- [x] 01-06-PLAN.md
+
+**Gap Closure Wave 7** *(blocked on Gap Closure Wave 6)*
+
+- [ ] 01-07-PLAN.md
+
+**Gap Closure Wave 8** *(blocked on Gap Closure Wave 7)*
+
+- [ ] 01-08-PLAN.md
 
 **Wave 1**
 
@@ -183,7 +201,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Execution Foundation | 5/5 | Complete   | 2026-07-11 |
+| 1. Execution Foundation | 6/8 | In Progress|  |
 | 2. Approval And Risk Boundary | 0/TBD | Not started | - |
 | 3. Paper Product Core | 0/TBD | Not started | - |
 | 4. Local Trading Workspace | 0/TBD | Not started | - |

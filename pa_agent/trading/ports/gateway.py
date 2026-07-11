@@ -17,6 +17,8 @@ from pa_agent.trading.domain.models import (
     TimeObservation,
 )
 
+from pa_agent.trading.ports.ledger import OutboundSubmission
+
 
 class TradingGatewayError(TradingDomainError):
     """Base typed failure a gateway may raise without exposing transport details."""
@@ -35,9 +37,8 @@ class TradingGateway(ABC):
 
     Adapters normalize any venue payload before returning from this contract and
     raise only ``TradingGatewayError`` subclasses for expected gateway failures.
-    A future coordinator MUST validate its admissible durable ledger claim
-    immediately before every call to :meth:`submit_order`; that admission stays
-    outside this adapter port.
+    Submission accepts only an irreversible ledger-created authorization, so an
+    adapter never receives a free-floating command or a revocable claim check.
     """
 
     @abstractmethod
@@ -63,12 +64,13 @@ class TradingGateway(ABC):
         """Return canonical account evidence scoped to one account and product."""
 
     @abstractmethod
-    def submit_order(self, command: ExecutionCommand) -> GatewayEvidence:
-        """Submit one persisted command after its coordinator holds an admissible claim.
+    def submit_order(self, outbound: OutboundSubmission) -> GatewayEvidence:
+        """Submit exactly the ledger-created irreversible outbound authorization.
 
-        The supplied command preserves its durable client-order ID. Ambiguous
-        outcomes raise :class:`GatewayAmbiguityError`; callers retain the same
-        persisted identities and reconcile rather than allocate another command.
+        The authorization carries the durable generated client-order ID and its
+        reconstructed command. Ambiguous outcomes raise
+        :class:`GatewayAmbiguityError`; callers retain the same persisted
+        identities and reconcile rather than allocate another command.
         """
 
     @abstractmethod

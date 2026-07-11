@@ -6,6 +6,10 @@ class TradingDomainError(Exception):
     """Base class for canonical execution-domain validation failures."""
 
 
+class CanonicalInputError(TradingDomainError, TypeError):
+    """Raised when a public canonical value receives an invalid runtime shape."""
+
+
 class DecimalValueError(TradingDomainError, TypeError):
     """Raised when a value is not a finite, exact trading Decimal."""
 

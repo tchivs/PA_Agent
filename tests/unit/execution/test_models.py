@@ -8,6 +8,7 @@ from decimal import Decimal
 import pytest
 
 from pa_agent.trading.domain.errors import (
+    CanonicalInputError,
     DecimalValueError,
     LifecycleTransitionError,
     ProductContextError,
@@ -22,12 +23,15 @@ from pa_agent.trading.domain.models import (
     InstrumentRules,
     IsolatedMarginOrderContext,
     LifecycleEvent,
+    Mode,
     OrderProjection,
     OrderState,
+    OrderType,
     Position,
     ProductType,
     QuoteObservation,
     RuleObservation,
+    Side,
     SpotOrderContext,
     TimeObservation,
     UsdtPerpetualOrderContext,
@@ -46,6 +50,110 @@ def test_decimal_ingress_accepts_decimal_and_text_but_rejects_unsafe_values() ->
     for value in (0.125, "NaN", Decimal("Infinity"), Decimal("-Infinity")):
         with pytest.raises(DecimalValueError):
             make_spot_command(quantity=value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("mode", "paper"),
+        ("side", "buy"),
+        ("order_type", "market"),
+        ("mode", ProductType.SPOT),
+        ("side", Mode.PAPER),
+        ("order_type", Side.BUY),
+    ),
+)
+def test_execution_command_rejects_untrusted_enum_values_before_price_rules(
+    field: str, value: object
+) -> None:
+    """Raw or wrong enum values cannot bypass canonical limit/market validation."""
+    with pytest.raises(CanonicalInputError):
+        make_spot_command(**{field: value})
+
+
+def test_execution_command_rejects_unknown_and_mismatched_product_contexts() -> None:
+    """Only exact declared context variants may enter the canonical command."""
+    with pytest.raises(CanonicalInputError):
+        make_spot_command(context=object())
+
+    mismatched_context = object.__new__(SpotOrderContext)
+    object.__setattr__(mismatched_context, "product", ProductType.ISOLATED_MARGIN)
+    with pytest.raises(CanonicalInputError):
+        make_spot_command(context=mismatched_context)
+
+
+def test_gateway_evidence_rejects_untyped_or_incomplete_fill_states() -> None:
+    """Partial and full observations require typed states and positive fill totals."""
+    base = {
+        "evidence_id": "evidence-typed",
+        "client_order_id": "client-order-001",
+        "observed_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+
+    with pytest.raises(CanonicalInputError):
+        GatewayEvidence(state="filled", **base)
+    with pytest.raises(CanonicalInputError):
+        GatewayEvidence(state=LifecycleEvent.FILL_OBSERVED, **base)
+    with pytest.raises(CanonicalInputError):
+        GatewayEvidence(state=OrderState.PARTIALLY_FILLED, **base)
+    with pytest.raises(CanonicalInputError):
+        GatewayEvidence(
+            state=OrderState.FILLED,
+            filled_quantity="0",
+            average_fill_price="42000",
+            **base,
+        )
+
+
+@pytest.mark.parametrize("minimum_field", ("minimum_quantity", "minimum_notional"))
+def test_instrument_rules_reject_negative_minima(minimum_field: str) -> None:
+    """Zero means no minimum; a negative external rule value fails closed."""
+    with pytest.raises(CanonicalInputError):
+        InstrumentRules(
+            symbol="BTCUSDT",
+            price_tick="0.01",
+            quantity_step="0.001",
+            **{minimum_field: "-0.001"},
+        )
+
+
+def test_account_observation_accepts_only_typed_product_and_tuple_records() -> None:
+    """Account observations cannot persist raw product or venue payload shapes."""
+    balance = Balance(asset="USDT", total="1000", available="900", reserved="100")
+    position = Position(
+        symbol="BTCUSDT",
+        quantity="0.125",
+        entry_price="42000",
+        mark_price="42001",
+        unrealized_pnl="0.125",
+        margin="0",
+    )
+    observation = AccountObservation(
+        account_id="paper-account",
+        product=ProductType.SPOT,
+        observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        balances=(balance,),
+        positions=(position,),
+    )
+
+    assert observation.balances == (balance,)
+    assert observation.positions == (position,)
+    for field, value in (
+        ("product", "spot"),
+        ("balances", [balance]),
+        ("balances", {"asset": "USDT"}),
+        ("balances", (0.125,)),
+        ("positions", [position]),
+        ("positions", ({"symbol": "BTCUSDT"},)),
+    ):
+        arguments = {
+            "account_id": "paper-account",
+            "product": ProductType.SPOT,
+            "observed_at": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+        arguments[field] = value
+        with pytest.raises(CanonicalInputError):
+            AccountObservation(**arguments)  # type: ignore[arg-type]
 
 
 def test_canonical_values_are_frozen_and_keep_decimal_fields() -> None:
@@ -82,7 +190,13 @@ def test_canonical_values_are_frozen_and_keep_decimal_fields() -> None:
         ),
         InstrumentRules(symbol="BTCUSDT", price_tick="0.01", quantity_step="0.001"),
         GatewayCapabilities(products=frozenset(ProductType), supports_order_lookup=True),
-        AccountObservation(account_id="paper-account", product=ProductType.SPOT, observed_at=datetime(2026, 1, 1, tzinfo=UTC)),
+        AccountObservation(
+            account_id="paper-account",
+            product=ProductType.SPOT,
+            observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+            balances=(Balance(asset="USDT", total="1000", available="900", reserved="100"),),
+            positions=(),
+        ),
         QuoteObservation(symbol="BTCUSDT", bid="42000.00", ask="42001.00", observed_at=datetime(2026, 1, 1, tzinfo=UTC)),
         TimeObservation(server_time=datetime(2026, 1, 1, tzinfo=UTC), observed_at=datetime(2026, 1, 1, tzinfo=UTC)),
         RuleObservation(rules=InstrumentRules(symbol="BTCUSDT", price_tick="0.01", quantity_step="0.001"), observed_at=datetime(2026, 1, 1, tzinfo=UTC)),

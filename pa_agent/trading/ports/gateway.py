@@ -35,8 +35,9 @@ class TradingGateway(ABC):
 
     Adapters normalize any venue payload before returning from this contract and
     raise only ``TradingGatewayError`` subclasses for expected gateway failures.
-    A future coordinator MUST obtain an admissible durable ledger claim before
-    calling :meth:`submit_order`; that admission stays outside this adapter port.
+    A future coordinator MUST validate its admissible durable ledger claim
+    immediately before every call to :meth:`submit_order`; that admission stays
+    outside this adapter port.
     """
 
     @abstractmethod

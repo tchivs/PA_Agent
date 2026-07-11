@@ -89,6 +89,14 @@ class ExecutionLedger(Protocol):
         returns those original identities as non-admissible and never allocates a
         second claim token, command, client-order ID, or reconciliation job.
         """
+    def assert_submission_claim_is_live(self, admission: SubmissionAdmission) -> None:
+        """Fail closed unless ``admission`` still matches the live durable claim.
+
+        A future coordinator MUST call this immediately before every gateway
+        submission because an immutable admission object becomes stale when
+        ambiguity consumes its durable claim.
+        """
+
 
     def mark_submission_ambiguous(
         self,

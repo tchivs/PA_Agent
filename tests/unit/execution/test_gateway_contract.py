@@ -127,6 +127,19 @@ def test_submission_admission_is_an_atomic_explicit_claim_result() -> None:
     assert admission.claim_token == "opaque-first-claim"
 
 
+
+def test_submission_claim_liveness_is_a_pre_submit_ledger_requirement() -> None:
+    """A stale immutable admission cannot authorize a future gateway retry."""
+    assert get_type_hints(ExecutionLedger.assert_submission_claim_is_live) == {
+        "admission": SubmissionAdmission,
+        "return": type(None),
+    }
+    claim_contract = ExecutionLedger.assert_submission_claim_is_live.__doc__ or ""
+    gateway_contract = TradingGateway.__doc__ or ""
+
+    assert "immediately before every gateway" in claim_contract
+    assert "immediately before every call" in gateway_contract
+
 def test_non_admissible_submission_admission_retains_first_identities_without_claim() -> None:
     """A duplicate unresolved command is recoverable but cannot obtain another submit claim."""
     existing = SubmissionAdmission(

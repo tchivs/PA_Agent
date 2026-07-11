@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from pa_agent.trading.domain.models import Fill
+from pa_agent.trading.domain.models import Fill, GatewayEvidence, OrderState
 from pa_agent.trading.persistence.sqlite_connection import (
     LedgerStorageError,
     open_sqlite_connection,
@@ -165,6 +166,75 @@ def test_concurrent_admissions_produce_exactly_one_admissible_claim(
     assert results.count(False) == 3
     assert _row_counts(execution_database_path)["submission_claims"] == 1
 
+def test_ambiguity_consumes_the_claim_and_rejects_stale_submission_authority(
+    execution_database_path: Path,
+) -> None:
+    """An ambiguous outcome atomically revokes the pre-submit authority it invalidates."""
+    ledger = SQLiteExecutionLedger(execution_database_path)
+    admission = ledger.create_or_load_and_claim_submission(make_spot_command())
+
+    ledger.assert_submission_claim_is_live(admission)
+    ledger.mark_submission_ambiguous(admission)
+
+    with pytest.raises(LedgerStorageError, match="no longer live"):
+        ledger.assert_submission_claim_is_live(admission)
+    ledger.close()
+
+    connection = open_sqlite_connection(execution_database_path)
+    try:
+        assert connection.execute(
+            "SELECT status FROM submission_claims WHERE command_id = ?", (admission.command_id,)
+        ).fetchone()[0] == "consumed"
+        assert connection.execute(
+            "SELECT lifecycle_state FROM orders WHERE command_id = ?", (admission.command_id,)
+        ).fetchone()[0] == OrderState.SUBMISSION_UNKNOWN.value
+    finally:
+        connection.close()
+
+
+def test_conflicting_exchange_order_identity_creates_incident_without_rewriting_projection(
+    execution_database_path: Path,
+) -> None:
+    """A second remote identity is contradictory evidence, not a projection update."""
+    ledger = SQLiteExecutionLedger(execution_database_path)
+    admission = ledger.create_or_load_and_claim_submission(make_spot_command())
+    ledger.mark_submission_ambiguous(admission)
+    job = ledger.list_unresolved_reconciliation_jobs()[0]
+    observed_at = datetime(2026, 7, 11, tzinfo=UTC)
+
+    first = GatewayEvidence(
+        evidence_id="acknowledgement-evidence-001",
+        client_order_id=admission.client_order_id,
+        exchange_order_id="exchange-order-A",
+        state=OrderState.ACKNOWLEDGED,
+        observed_at=observed_at,
+    )
+    conflicting = GatewayEvidence(
+        evidence_id="open-evidence-002",
+        client_order_id=admission.client_order_id,
+        exchange_order_id="exchange-order-B",
+        state=OrderState.OPEN,
+        observed_at=observed_at,
+    )
+
+    assert ledger.apply_reconciliation_evidence(job, first).evidence_applied is True
+    result = ledger.apply_reconciliation_evidence(job, conflicting)
+    ledger.close()
+
+    assert result.lifecycle_state is OrderState.ACKNOWLEDGED
+    assert result.evidence_applied is False
+    connection = open_sqlite_connection(execution_database_path)
+    try:
+        assert connection.execute(
+            "SELECT exchange_order_id, lifecycle_state FROM orders WHERE command_id = ?",
+            (admission.command_id,),
+        ).fetchone() == ("exchange-order-A", OrderState.ACKNOWLEDGED.value)
+        assert connection.execute(
+            "SELECT kind FROM reconciliation_incidents WHERE command_id = ?", (admission.command_id,)
+        ).fetchone()[0] == "contradictory_exchange_order_evidence"
+    finally:
+        connection.close()
+
 
 def test_duplicate_fill_is_idempotent_and_conflicting_fill_creates_incident(
     execution_database_path: Path,
@@ -192,5 +262,44 @@ def test_duplicate_fill_is_idempotent_and_conflicting_fill_creates_incident(
     try:
         assert connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM reconciliation_incidents").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_fill_id_reused_by_a_different_command_is_contradictory_evidence(
+    execution_database_path: Path,
+) -> None:
+    """Economic equality cannot make one fill ID belong to two commands."""
+    ledger = SQLiteExecutionLedger(execution_database_path)
+    first = ledger.create_or_load_and_claim_submission(make_spot_command())
+    second = ledger.create_or_load_and_claim_submission(
+        make_spot_command(
+            command_id="command-002",
+            logical_command_key="logical-command-002",
+            client_order_id="client-order-002",
+        )
+    )
+    fill = Fill(
+        fill_id="fill-command-conflict-001",
+        command_id=first.command_id,
+        quantity=Decimal("0.125"),
+        price=Decimal("42000.50"),
+        fee=Decimal("1.00"),
+        fee_asset="USDT",
+        observed_at=ledger.utc_now(),
+    )
+
+    assert ledger.record_fill_evidence(fill) is True
+    assert ledger.record_fill_evidence(replace(fill, command_id=second.command_id)) is False
+    ledger.close()
+
+    connection = open_sqlite_connection(execution_database_path)
+    try:
+        assert connection.execute(
+            "SELECT command_id FROM fills WHERE fill_id = ?", (fill.fill_id,)
+        ).fetchone()[0] == first.command_id
+        assert connection.execute(
+            "SELECT kind FROM reconciliation_incidents WHERE command_id = ?", (second.command_id,)
+        ).fetchone()[0] == "contradictory_fill_evidence"
     finally:
         connection.close()

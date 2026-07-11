@@ -147,6 +147,26 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 is_admissible=True,
                 claim_token=claim_token,
             )
+    def assert_submission_claim_is_live(self, admission: SubmissionAdmission) -> None:
+        """Fail closed when a durable admission claim is absent, stale, or consumed."""
+        if not admission.is_admissible or admission.claim_token is None:
+            raise LedgerStorageError("submission admission has no active claim")
+        row = self._require_connection().execute(
+            """
+            SELECT orders.lifecycle_state, claims.claim_token, claims.status
+            FROM orders
+            JOIN submission_claims AS claims ON claims.command_id = orders.command_id
+            WHERE orders.command_id = ?
+            """,
+            (admission.command_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != OrderState.SUBMITTING.value
+            or row[1] != admission.claim_token
+            or row[2] != "admitted"
+        ):
+            raise LedgerStorageError("submission claim is no longer live")
 
     def mark_submission_ambiguous(
         self,
@@ -166,19 +186,34 @@ class SQLiteExecutionLedger(ExecutionLedger):
         with transaction(connection):
             row = connection.execute(
                 """
-                SELECT commands.client_order_id, orders.lifecycle_state, jobs.job_id
+                SELECT commands.client_order_id, orders.lifecycle_state, jobs.job_id,
+                       claims.claim_token, claims.status
                 FROM order_commands AS commands
                 JOIN orders ON orders.command_id = commands.command_id
                 JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
+                JOIN submission_claims AS claims ON claims.command_id = commands.command_id
                 WHERE commands.command_id = ?
                 """,
                 (admission.command_id,),
             ).fetchone()
             if row is None or row[0] != admission.client_order_id or row[2] != admission.reconciliation_job_id:
                 raise LedgerStorageError("submission admission does not match durable ledger identities")
+            if not admission.is_admissible or admission.claim_token is None or row[3] != admission.claim_token:
+                raise LedgerStorageError("submission admission does not match a durable claim")
             previous_state = OrderState(row[1])
             if previous_state is OrderState.SUBMISSION_UNKNOWN:
+                if row[4] not in {"admitted", "consumed"}:
+                    raise LedgerStorageError("ambiguous submission has an invalid durable claim status")
+                connection.execute(
+                    """
+                    UPDATE submission_claims SET status = ?
+                    WHERE command_id = ? AND claim_token = ? AND status = ?
+                    """,
+                    ("consumed", admission.command_id, admission.claim_token, "admitted"),
+                )
                 return
+            if row[4] != "admitted":
+                raise LedgerStorageError("submission claim is no longer live")
             next_state = assert_transition(previous_state, event)
             now = _timestamp_text(self.utc_now())
             self._append_event(
@@ -201,6 +236,15 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 """,
                 (event.value, "queued", now, admission.reconciliation_job_id),
             )
+            consumed = connection.execute(
+                """
+                UPDATE submission_claims SET status = ?
+                WHERE command_id = ? AND claim_token = ? AND status = ?
+                """,
+                ("consumed", admission.command_id, admission.claim_token, "admitted"),
+            )
+            if consumed.rowcount != 1:
+                raise LedgerStorageError("submission claim could not be consumed")
 
     def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
         """Load queued non-terminal work using the first persisted identities."""
@@ -242,7 +286,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
         with transaction(connection):
             row = connection.execute(
                 """
-                SELECT commands.client_order_id, jobs.job_id, orders.lifecycle_state, orders.evidence_cursor
+                SELECT commands.client_order_id, jobs.job_id, orders.lifecycle_state, orders.evidence_cursor,
+                       orders.exchange_order_id
                 FROM order_commands AS commands
                 JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
                 JOIN orders ON orders.command_id = commands.command_id
@@ -258,6 +303,21 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     command_id=job.command_id,
                     kind="contradictory_client_order_evidence",
                     detail={"expected_client_order_id": job.client_order_id, "evidence": canonicalize(evidence)},
+                )
+                return ReconciliationResult(current_state, evidence_applied=False)
+            if (
+                row[4] is not None
+                and evidence.exchange_order_id is not None
+                and row[4] != evidence.exchange_order_id
+            ):
+                self._record_incident(
+                    command_id=job.command_id,
+                    kind="contradictory_exchange_order_evidence",
+                    detail={
+                        "persisted_exchange_order_id": row[4],
+                        "observed_exchange_order_id": evidence.exchange_order_id,
+                        "evidence": canonicalize(evidence),
+                    },
                 )
                 return ReconciliationResult(current_state, evidence_applied=False)
             if row[3] == evidence.evidence_id:
@@ -328,7 +388,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         with transaction(connection):
             existing = connection.execute(
                 """
-                SELECT quantity, price, fee, fee_asset, observed_at_utc
+                SELECT command_id, quantity, price, fee, fee_asset, observed_at_utc
                 FROM fills WHERE fill_id = ?
                 """,
                 (fill.fill_id,),
@@ -343,7 +403,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     (fill.fill_id, fill.command_id, *values),
                 )
                 return True
-            if tuple(existing) == values:
+            if tuple(existing) == (fill.command_id, *values):
                 return True
             self._record_incident(
                 command_id=fill.command_id,

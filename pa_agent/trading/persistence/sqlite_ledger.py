@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pa_agent.trading.domain.lifecycle import assert_transition
 from pa_agent.trading.domain.errors import LifecycleTransitionError, ReconciliationEvidenceError
+from pa_agent.trading.domain.lifecycle import assert_transition
 from pa_agent.trading.domain.models import (
     ExecutionCommand,
     Fill,

@@ -5,6 +5,9 @@ from abc import ABC
 from inspect import getmembers, isabstract, signature
 from typing import Any, get_type_hints
 
+import pytest
+
+from pa_agent.trading.domain.errors import TradingDomainError
 from pa_agent.trading.domain.models import (
     AccountObservation,
     ExecutionCommand,
@@ -18,7 +21,12 @@ from pa_agent.trading.domain.models import (
     RuleObservation,
     TimeObservation,
 )
-from pa_agent.trading.ports.gateway import TradingGateway
+from pa_agent.trading.ports.gateway import (
+    GatewayAmbiguityError,
+    GatewayUnavailableError,
+    TradingGateway,
+    TradingGatewayError,
+)
 from pa_agent.trading.ports.ledger import ExecutionLedger, SubmissionAdmission
 
 
@@ -89,6 +97,14 @@ def test_trading_gateway_annotations_are_canonical_and_venue_neutral() -> None:
         assert "payload" not in rendered
 
     assert signature(TradingGateway.submit_order).return_annotation != signature(TradingGateway.submit_order).empty
+
+
+def test_gateway_failures_are_typed_trading_domain_errors() -> None:
+    """Future adapters cannot surface untyped transport failure classes at this port."""
+    assert issubclass(TradingGatewayError, TradingDomainError)
+    assert issubclass(GatewayAmbiguityError, TradingGatewayError)
+    assert issubclass(GatewayUnavailableError, TradingGatewayError)
+
 
 
 def test_submission_admission_is_an_atomic_explicit_claim_result() -> None:

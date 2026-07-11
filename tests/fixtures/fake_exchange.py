@@ -1,9 +1,10 @@
 """Deterministic reconciliation-only gateway for execution recovery tests."""
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
-from pa_agent.trading.domain.models import GatewayEvidence
+from pa_agent.trading.domain.models import GatewayEvidence, RuleObservation
+from pa_agent.trading.ports.gateway import GatewayUnavailableError
 
 
 class ReconciliationOnlyGateway:
@@ -27,3 +28,27 @@ class ReconciliationOnlyGateway:
         """Reject every submission because recovery may only obtain evidence."""
         self.submit_call_count += 1
         raise AssertionError("recovery must never submit an order")
+
+
+class ScriptedInstrumentRuleGateway:
+    """Consume scripted rule observations and reject every attempted submission."""
+
+    def __init__(self, responses: Sequence[RuleObservation | GatewayUnavailableError]) -> None:
+        self._responses = list(responses)
+        self.instrument_rule_symbols: list[str] = []
+        self.submit_call_count = 0
+
+    def get_instrument_rules(self, symbol: str) -> RuleObservation:
+        """Record one symbol lookup and return its next typed scripted response."""
+        self.instrument_rule_symbols.append(symbol)
+        if not self._responses:
+            raise AssertionError("unexpected instrument-rule lookup")
+        response = self._responses.pop(0)
+        if isinstance(response, GatewayUnavailableError):
+            raise response
+        return response
+
+    def submit_order(self, *args: object, **kwargs: object) -> GatewayEvidence:
+        """Reject every submission because validation may only obtain rule metadata."""
+        self.submit_call_count += 1
+        raise AssertionError("validation must never submit an order")

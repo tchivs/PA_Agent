@@ -14,6 +14,10 @@ class ProductContextError(TradingDomainError, ValueError):
     """Raised when a command's product context is internally inconsistent."""
 
 
+class InstrumentRuleValidationError(TradingDomainError, ValueError):
+    """Raised when a canonical command violates current instrument rules."""
+
+
 class LifecycleTransitionError(TradingDomainError, ValueError):
     """Raised when an order lifecycle event cannot legally advance its state."""
 

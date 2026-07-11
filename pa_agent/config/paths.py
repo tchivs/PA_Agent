@@ -21,6 +21,8 @@ RECORDS_PENDING_DIR: Path = PROJECT_ROOT / "records" / "pending"
 EXPERIENCE_DIR: Path = PROJECT_ROOT / "experience"
 CONFIG_DIR: Path = PROJECT_ROOT / "config"
 LOGS_DIR: Path = PROJECT_ROOT / "logs"
+TRADE_RECORDS_DIR: Path = PROJECT_ROOT / "trade_records"
+EXECUTION_LEDGER_PATH: Path = TRADE_RECORDS_DIR / "execution" / "execution_ledger.sqlite3"
 
 # ── Individual file paths ─────────────────────────────────────────────────────
 FEISHU_JSON_LEGACY_PATH: Path = CONFIG_DIR / "feishu.json"

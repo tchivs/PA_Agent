@@ -87,6 +87,44 @@ def test_repeated_unresolved_command_reuses_identities_without_second_claim_afte
     }
 
 
+def test_recovery_after_restart_retains_first_client_and_job_and_denies_second_claim(
+    execution_database_path: Path,
+) -> None:
+    """Recovery queries only the original client ID after reopening durable state."""
+    from dataclasses import replace
+
+    from pa_agent.trading.application.recovery import RecoveryService
+    from pa_agent.trading.domain.models import OrderState
+    from tests.fixtures.fake_exchange import ReconciliationOnlyGateway
+
+    command = make_spot_command()
+    first_ledger = SQLiteExecutionLedger(execution_database_path)
+    first = first_ledger.create_or_load_and_claim_submission(command)
+    first_ledger.mark_submission_ambiguous(first)
+    first_ledger.close()
+
+    reopened_ledger = SQLiteExecutionLedger(execution_database_path)
+    gateway = ReconciliationOnlyGateway({first.client_order_id: None})
+    recovery = RecoveryService(ledger=reopened_ledger, gateway=gateway)
+    result = recovery.recover_startup()
+    second = reopened_ledger.create_or_load_and_claim_submission(
+        replace(command, command_id="replacement-command", client_order_id="replacement-client")
+    )
+    reopened_ledger.close()
+
+    assert result[0].lifecycle_state is OrderState.SUBMISSION_UNKNOWN
+    assert result[0].evidence_applied is False
+    assert gateway.lookup_client_order_ids == [first.client_order_id]
+    assert gateway.submit_call_count == 0
+    assert second.is_admissible is False
+    assert second.claim_token is None
+    assert (second.command_id, second.client_order_id, second.reconciliation_job_id) == (
+        first.command_id,
+        first.client_order_id,
+        first.reconciliation_job_id,
+    )
+
+
 def test_injected_admission_failure_leaves_no_partial_records(execution_database_path: Path) -> None:
     """A failure inside the admission transaction rolls back all durable side effects."""
     def fail_before_claim(stage: str) -> None:

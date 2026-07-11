@@ -4,7 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from pa_agent.trading.domain.models import ExecutionCommand, OrderState
+from pa_agent.trading.domain.models import (
+    ExecutionCommand,
+    GatewayEvidence,
+    LifecycleEvent,
+    OrderState,
+)
 
 _UNRESOLVED_SUBMISSION_STATES = frozenset(
     {OrderState.SUBMITTING, OrderState.SUBMISSION_UNKNOWN}
@@ -41,6 +46,28 @@ class SubmissionAdmission:
             raise ValueError("a non-admissible submission cannot carry a claim token")
 
 
+@dataclass(frozen=True)
+class ReconciliationJob:
+    """Persisted recovery identity for one non-terminal command."""
+
+    command_id: str
+    client_order_id: str
+    reconciliation_job_id: str
+    lifecycle_state: OrderState
+
+    def __post_init__(self) -> None:
+        if not all((self.command_id, self.client_order_id, self.reconciliation_job_id)):
+            raise ValueError("reconciliation job requires persisted command, client, and job IDs")
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    """Result of applying one normalized reconciliation observation."""
+
+    lifecycle_state: OrderState
+    evidence_applied: bool
+
+
 @runtime_checkable
 class ExecutionLedger(Protocol):
     """Repository port that makes durable submission admission an atomic boundary."""
@@ -56,11 +83,18 @@ class ExecutionLedger(Protocol):
         second claim token, command, client-order ID, or reconciliation job.
         """
 
-    def mark_submission_ambiguous(self, admission: SubmissionAdmission) -> None:
-        """Record ambiguity and retain reconciliation using the same persisted identities.
+    def mark_submission_ambiguous(
+        self,
+        admission: SubmissionAdmission,
+        *,
+        event: LifecycleEvent = LifecycleEvent.LOCAL_TIMEOUT,
+    ) -> None:
+        """Record one local interruption and retain reconciliation identities."""
 
-        A coordinator calls this after an uncertain gateway outcome. Recovery may
-        query gateway evidence only with the admission's command/client/job
-        identities; it must not create replacement identities or infer a terminal
-        result from local control flow.
-        """
+    def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
+        """Return persisted non-terminal jobs without allocating replacement identities."""
+
+    def apply_reconciliation_evidence(
+        self, job: ReconciliationJob, evidence: GatewayEvidence
+    ) -> ReconciliationResult:
+        """Append legal normalized evidence or retain state and record an incident."""

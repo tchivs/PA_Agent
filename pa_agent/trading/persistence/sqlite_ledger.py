@@ -11,9 +11,11 @@ from typing import Any
 from uuid import uuid4
 
 from pa_agent.trading.domain.lifecycle import assert_transition
+from pa_agent.trading.domain.errors import LifecycleTransitionError, ReconciliationEvidenceError
 from pa_agent.trading.domain.models import (
     ExecutionCommand,
     Fill,
+    GatewayEvidence,
     LifecycleEvent,
     OrderState,
     canonicalize,
@@ -26,7 +28,12 @@ from pa_agent.trading.persistence.sqlite_connection import (
     transaction,
 )
 from pa_agent.trading.ports.clock import UtcClock
-from pa_agent.trading.ports.ledger import ExecutionLedger, SubmissionAdmission
+from pa_agent.trading.ports.ledger import (
+    ExecutionLedger,
+    ReconciliationJob,
+    ReconciliationResult,
+    SubmissionAdmission,
+)
 
 
 class SQLiteExecutionLedger(ExecutionLedger):
@@ -141,8 +148,20 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 claim_token=claim_token,
             )
 
-    def mark_submission_ambiguous(self, admission: SubmissionAdmission) -> None:
-        """Persist an unresolved lifecycle transition without allocating replacement identities."""
+    def mark_submission_ambiguous(
+        self,
+        admission: SubmissionAdmission,
+        *,
+        event: LifecycleEvent = LifecycleEvent.LOCAL_TIMEOUT,
+    ) -> None:
+        """Persist a local interruption without allocating replacement identities."""
+        if event not in {
+            LifecycleEvent.LOCAL_TIMEOUT,
+            LifecycleEvent.LOCAL_CANCELLATION,
+            LifecycleEvent.STREAM_GAP,
+            LifecycleEvent.MALFORMED_ACKNOWLEDGEMENT,
+        }:
+            raise ValueError("submission ambiguity requires a local interruption event")
         connection = self._require_connection()
         with transaction(connection):
             row = connection.execute(
@@ -160,15 +179,15 @@ class SQLiteExecutionLedger(ExecutionLedger):
             previous_state = OrderState(row[1])
             if previous_state is OrderState.SUBMISSION_UNKNOWN:
                 return
-            next_state = assert_transition(previous_state, LifecycleEvent.LOCAL_TIMEOUT)
+            next_state = assert_transition(previous_state, event)
             now = _timestamp_text(self.utc_now())
             self._append_event(
                 command_id=admission.command_id,
                 previous_state=previous_state,
                 new_state=next_state,
-                event=LifecycleEvent.LOCAL_TIMEOUT,
+                event=event,
                 occurred_at=now,
-                detail={"source": "local", "reason": "submission_ambiguous"},
+                detail={"source": "local", "reason": event.value},
             )
             connection.execute(
                 "UPDATE orders SET lifecycle_state = ? WHERE command_id = ?",
@@ -180,8 +199,116 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 SET reason = ?, status = ?, next_action_at_utc = ?
                 WHERE job_id = ?
                 """,
-                ("submission_ambiguous", "queued", now, admission.reconciliation_job_id),
+                (event.value, "queued", now, admission.reconciliation_job_id),
             )
+
+    def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
+        """Load queued non-terminal work using the first persisted identities."""
+        rows = self._require_connection().execute(
+            """
+            SELECT commands.command_id, commands.client_order_id, jobs.job_id, orders.lifecycle_state
+            FROM reconciliation_jobs AS jobs
+            JOIN order_commands AS commands ON commands.command_id = jobs.command_id
+            JOIN orders ON orders.command_id = commands.command_id
+            WHERE jobs.status = ?
+              AND orders.lifecycle_state NOT IN (?, ?, ?)
+            ORDER BY jobs.next_action_at_utc, jobs.job_id
+            """,
+            (
+                "queued",
+                OrderState.FILLED.value,
+                OrderState.CANCELLED.value,
+                OrderState.REJECTED.value,
+            ),
+        ).fetchall()
+        try:
+            return tuple(
+                ReconciliationJob(
+                    command_id=row[0],
+                    client_order_id=row[1],
+                    reconciliation_job_id=row[2],
+                    lifecycle_state=OrderState(row[3]),
+                )
+                for row in rows
+            )
+        except ValueError as exc:
+            raise LedgerStorageError("stored recovery job lifecycle state is invalid") from exc
+
+    def apply_reconciliation_evidence(
+        self, job: ReconciliationJob, evidence: GatewayEvidence
+    ) -> ReconciliationResult:
+        """Append legal canonical evidence while retaining conflicts as incidents."""
+        connection = self._require_connection()
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT commands.client_order_id, jobs.job_id, orders.lifecycle_state, orders.evidence_cursor
+                FROM order_commands AS commands
+                JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
+                JOIN orders ON orders.command_id = commands.command_id
+                WHERE commands.command_id = ?
+                """,
+                (job.command_id,),
+            ).fetchone()
+            if row is None or row[0] != job.client_order_id or row[1] != job.reconciliation_job_id:
+                raise LedgerStorageError("reconciliation job does not match durable ledger identities")
+            current_state = OrderState(row[2])
+            if evidence.client_order_id != job.client_order_id:
+                self._record_incident(
+                    command_id=job.command_id,
+                    kind="contradictory_client_order_evidence",
+                    detail={"expected_client_order_id": job.client_order_id, "evidence": canonicalize(evidence)},
+                )
+                return ReconciliationResult(current_state, evidence_applied=False)
+            if row[3] == evidence.evidence_id:
+                return ReconciliationResult(current_state, evidence_applied=True)
+            try:
+                event = _lifecycle_event_for_evidence(evidence)
+                next_state = assert_transition(current_state, event, evidence=evidence)
+            except (LifecycleTransitionError, ReconciliationEvidenceError):
+                self._record_incident(
+                    command_id=job.command_id,
+                    kind="out_of_order_reconciliation_evidence",
+                    detail={"evidence": canonicalize(evidence), "current_state": current_state.value},
+                )
+                return ReconciliationResult(current_state, evidence_applied=False)
+            self._append_event(
+                command_id=job.command_id,
+                previous_state=current_state,
+                new_state=next_state,
+                event=event,
+                occurred_at=_timestamp_text(evidence.observed_at),
+                detail={"source": "reconciliation", "evidence": canonicalize(evidence)},
+                evidence=evidence,
+            )
+            connection.execute(
+                """
+                UPDATE orders
+                SET exchange_order_id = COALESCE(?, exchange_order_id),
+                    lifecycle_state = ?, evidence_cursor = ?
+                WHERE command_id = ?
+                """,
+                (evidence.exchange_order_id, next_state.value, evidence.evidence_id, job.command_id),
+            )
+            terminal = next_state in {
+                OrderState.FILLED,
+                OrderState.CANCELLED,
+                OrderState.REJECTED,
+            }
+            connection.execute(
+                """
+                UPDATE reconciliation_jobs
+                SET reason = ?, status = ?, attempt_count = attempt_count + 1, next_action_at_utc = ?
+                WHERE job_id = ?
+                """,
+                (
+                    "terminal_evidence" if terminal else "reconciliation_required",
+                    "completed" if terminal else "queued",
+                    _timestamp_text(self.utc_now()),
+                    job.reconciliation_job_id,
+                ),
+            )
+            return ReconciliationResult(next_state, evidence_applied=True)
 
     def record_fill_evidence(self, fill: Fill) -> bool:
         """Persist idempotent fill evidence or record a conflicting-evidence incident.
@@ -218,19 +345,10 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 return True
             if tuple(existing) == values:
                 return True
-            connection.execute(
-                """
-                INSERT INTO reconciliation_incidents(
-                    incident_id, command_id, kind, detail_json, observed_at_utc
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    _new_id("incident"),
-                    fill.command_id,
-                    "contradictory_fill_evidence",
-                    _canonical_json({"fill_id": fill.fill_id, "observed": canonicalize(fill)}),
-                    _timestamp_text(self.utc_now()),
-                ),
+            self._record_incident(
+                command_id=fill.command_id,
+                kind="contradictory_fill_evidence",
+                detail={"fill_id": fill.fill_id, "observed": canonicalize(fill)},
             )
             return False
 
@@ -304,9 +422,10 @@ class SQLiteExecutionLedger(ExecutionLedger):
         event: LifecycleEvent,
         occurred_at: str,
         detail: Mapping[str, Any],
+        evidence: GatewayEvidence | None = None,
     ) -> None:
         """Append one sequence-checked lifecycle event inside the active transaction."""
-        expected = assert_transition(previous_state, event)
+        expected = assert_transition(previous_state, event, evidence=evidence)
         if expected is not new_state:
             raise LedgerStorageError("event projection does not match lifecycle transition")
         sequence = self._require_connection().execute(
@@ -331,6 +450,23 @@ class SQLiteExecutionLedger(ExecutionLedger):
             ),
         )
 
+    def _record_incident(self, *, command_id: str, kind: str, detail: Mapping[str, Any]) -> None:
+        """Append a sanitized reconciliation incident without rewriting evidence history."""
+        self._require_connection().execute(
+            """
+            INSERT INTO reconciliation_incidents(
+                incident_id, command_id, kind, detail_json, observed_at_utc
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("incident"),
+                command_id,
+                kind,
+                _canonical_json(canonicalize(dict(detail))),
+                _timestamp_text(self.utc_now()),
+            ),
+        )
+
     def _inject_failure(self, stage: str) -> None:
         """Invoke deterministic integration fault injection inside the active transaction."""
         if self._failure_injector is not None:
@@ -343,6 +479,23 @@ class SQLiteExecutionLedger(ExecutionLedger):
         return self._connection
 
 
+
+def _lifecycle_event_for_evidence(evidence: GatewayEvidence) -> LifecycleEvent:
+    """Map a normalized external state to the sole corresponding lifecycle event."""
+    events = {
+        OrderState.ACKNOWLEDGED: LifecycleEvent.ACKNOWLEDGEMENT_OBSERVED,
+        OrderState.OPEN: LifecycleEvent.OPEN_OBSERVED,
+        OrderState.PARTIALLY_FILLED: LifecycleEvent.PARTIAL_FILL_OBSERVED,
+        OrderState.FILLED: LifecycleEvent.FILL_OBSERVED,
+        OrderState.REJECTED: LifecycleEvent.REJECTION_OBSERVED,
+        OrderState.CANCELLED: LifecycleEvent.CANCELLATION_OBSERVED,
+    }
+    try:
+        return events[evidence.state]
+    except KeyError as exc:
+        raise ReconciliationEvidenceError(
+            f"evidence state {evidence.state.value} is not a remote lifecycle observation"
+        ) from exc
 def _canonical_json(value: Any) -> str:
     """Serialize canonical values deterministically for durable comparison and auditing."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: execution-foundation
 status: executing
-stopped_at: Completed 01-01-PLAN.md; ready for 01-02-PLAN.md.
-last_updated: "2026-07-11T05:52:24Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-07-11T06:11:10.474Z"
 last_activity: 2026-07-11
-last_activity_desc: Phase 01 plan 01 completed
+last_activity_desc: Phase 01 plan 02 completed
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 5
-  completed_plans: 1
-  percent: 20
+  completed_plans: 2
+  percent: 40
 ---
 
 # Project State
@@ -29,30 +29,30 @@ See: `.planning/PROJECT.md` (updated 2026-07-11)
 ## Current Position
 
 Phase: 01 (execution-foundation) — EXECUTING
-Plan: 2 of 4
-Status: Ready for 01-02-PLAN.md
-Last activity: 2026-07-11 — Phase 01 plan 01 completed
+Plan: 3 of 4
+Status: Ready for 01-03-PLAN.md
+Last activity: 2026-07-11 — Phase 01 plan 02 completed
 
-Progress: [██░░░░░░░░] 25%
+Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 1
-- Average duration: 7 min
-- Total execution time: 0.1 hours
+- Total plans completed: 2
+- Average duration: 6 min
+- Total execution time: 0.2 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01. Execution Foundation | 1 | 7 min | 7 min |
+| 01. Execution Foundation | 2 | 11 min | 6 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01 (7 min)
-- Trend: Established
+- Last 5 plans: 01-01 (7 min), 01-02 (4 min)
+- Trend: Improving
 
 ## Accumulated Context
 
@@ -66,6 +66,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - Every initial-release command requires explicit per-order operator approval; LLMs, alerts, and notifications remain advisory only.
 - Canonical execution numeric ingress accepts only finite `Decimal` values or text and serializes as fixed-point text.
 - Lifecycle terminal states require matching normalized gateway evidence; local interruptions remain `SUBMISSION_UNKNOWN`.
+- Gateway adapters remain claim-free: a future coordinator must obtain durable ledger admission before calling `submit_order`.
 
 ### Pending Todos
 
@@ -86,6 +87,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-11
-Stopped at: Completed 01-01-PLAN.md; ready for 01-02-PLAN.md.
+Last session: 2026-07-11T06:11:10.469Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None

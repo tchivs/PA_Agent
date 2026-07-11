@@ -19,6 +19,10 @@ class ReconciliationOnlyGateway:
         self.lookup_client_order_ids.append(client_order_id)
         return self._evidence_by_client_order_id.get(client_order_id)
 
+    def set_evidence(self, client_order_id: str, evidence: GatewayEvidence | None) -> None:
+        """Replace one deterministic lookup response for a later recovery attempt."""
+        self._evidence_by_client_order_id[client_order_id] = evidence
+
     def submit_order(self, *args: object, **kwargs: object) -> GatewayEvidence:
         """Reject every submission because recovery may only obtain evidence."""
         self.submit_call_count += 1

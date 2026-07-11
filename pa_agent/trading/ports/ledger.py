@@ -11,8 +11,15 @@ from pa_agent.trading.domain.models import (
     OrderState,
 )
 
-_UNRESOLVED_SUBMISSION_STATES = frozenset(
-    {OrderState.SUBMITTING, OrderState.SUBMISSION_UNKNOWN}
+_NONTERMINAL_SUBMISSION_STATES = frozenset(
+    {
+        OrderState.SUBMITTING,
+        OrderState.SUBMISSION_UNKNOWN,
+        OrderState.ACKNOWLEDGED,
+        OrderState.OPEN,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.CANCEL_REQUESTED,
+    }
 )
 
 
@@ -35,8 +42,8 @@ class SubmissionAdmission:
     def __post_init__(self) -> None:
         if not all((self.command_id, self.client_order_id, self.reconciliation_job_id)):
             raise ValueError("submission admission requires persisted command, client, and job IDs")
-        if self.lifecycle_state not in _UNRESOLVED_SUBMISSION_STATES:
-            raise ValueError("submission admission requires an unresolved lifecycle state")
+        if self.lifecycle_state not in _NONTERMINAL_SUBMISSION_STATES:
+            raise ValueError("submission admission requires a non-terminal lifecycle state")
         if self.is_admissible:
             if self.lifecycle_state is not OrderState.SUBMITTING:
                 raise ValueError("only a submitting command can receive a submission claim")

@@ -114,6 +114,8 @@ class LifecycleRecoveryMachine(RuleBasedStateMachine):
     @precondition(lambda self: self._admission is not None and self._ambiguous and not self._terminal_evidence)
     def duplicate_or_out_of_order_evidence(self) -> None:
         """Keep duplicate evidence idempotent and retain invalid evidence as an incident."""
+        jobs = self._ledger.list_unresolved_reconciliation_jobs()
+        assert len(jobs) == 1
         self._gateway.set_evidence(
             self._admission.client_order_id,
             GatewayEvidence(
@@ -124,9 +126,12 @@ class LifecycleRecoveryMachine(RuleBasedStateMachine):
             ),
         )
         results = self._recovery.recover_startup()
-        if results:
+        if jobs[0].lifecycle_state is OrderState.OPEN:
             assert results[0].evidence_applied is False
             assert self._count("reconciliation_incidents") >= 1
+        else:
+            assert results[0].evidence_applied is True
+            assert self._recovery.recover_startup()[0].evidence_applied is True
 
     @rule()
     @precondition(lambda self: self._admission is not None and self._ambiguous and not self._terminal_evidence)

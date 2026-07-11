@@ -402,8 +402,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
             state = OrderState(row[3])
         except ValueError as exc:
             raise LedgerStorageError("stored order lifecycle state is invalid") from exc
-        if state not in {OrderState.SUBMITTING, OrderState.SUBMISSION_UNKNOWN}:
-            raise LedgerStorageError("stored command is not unresolved and cannot receive admission")
+        if state in {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED}:
+            raise LedgerStorageError("stored command is terminal and cannot receive admission")
         return SubmissionAdmission(
             command_id=row[0],
             client_order_id=row[1],

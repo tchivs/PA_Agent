@@ -96,7 +96,7 @@ class ExecutionLedger(Protocol):
         *,
         event: LifecycleEvent = LifecycleEvent.LOCAL_TIMEOUT,
     ) -> None:
-        """Record one local interruption and retain reconciliation identities."""
+        """Record one local interruption; recovery retains the same persisted identities for reconciliation."""
 
     def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
         """Return persisted non-terminal jobs without allocating replacement identities."""

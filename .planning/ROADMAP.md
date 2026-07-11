@@ -30,7 +30,10 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/domain/`, `pa_agent/trading/ports/`, `pa_agent/trading/persistence/`, and test support under `tests/fixtures/`, `tests/unit/execution/`, `tests/property/execution/`, `tests/integration/execution/`; preserve the existing boundaries in `pa_agent/data/base.py` and `pa_agent/records/trade_logger.py`.
 **Key risks and gates**: SQLite schema/migration and single-writer behavior must be selected and tested before any gateway. All Decimal conversion happens at the gateway boundary. Stream gaps, timeouts, cancellation, and restart are reconciliation triggers, never terminal-state shortcuts.
-**Plans**: 4/4 plans complete
+**Plans**: 5/5 plans complete
+
+- [x] 01-05-PLAN.md
+
 **Wave 1**
 
 - [x] 01-01-PLAN.md
@@ -180,7 +183,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Execution Foundation | 4/4 | Complete   | 2026-07-11 |
+| 1. Execution Foundation | 5/5 | Complete   | 2026-07-11 |
 | 2. Approval And Risk Boundary | 0/TBD | Not started | - |
 | 3. Paper Product Core | 0/TBD | Not started | - |
 | 4. Local Trading Workspace | 0/TBD | Not started | - |

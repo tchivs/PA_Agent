@@ -4,17 +4,17 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01
 current_phase_name: execution-foundation
-status: ready_for_verification
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-07-11T06:47:57.781Z"
+status: verifying
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-07-11T09:21:10.029Z"
 last_activity: 2026-07-11
-last_activity_desc: Phase 01 plan 04 completed
+last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 7
-  completed_phases: 1
-  total_plans: 5
-  completed_plans: 4
-  percent: 80
+  completed_phases: 0
+  total_plans: 6
+  completed_plans: 5
+  percent: 0
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-07-11)
 
 **Core value:** An operator can safely turn a validated analysis recommendation into an explicitly approved, traceable order without coupling strategy logic to a particular exchange.
-**Current focus:** Phase 01 verification
+**Current focus:** Phase 01 — execution-foundation
 
 ## Current Position
 
-Phase: 01 (execution-foundation) — COMPLETE
-Plan: 4 of 4
-Status: Ready for phase verification
-Last activity: 2026-07-11 — Phase 01 plan 04 completed
+Phase: 01 (execution-foundation) — EXECUTING
+Plan: 5 of 5
+Status: Phase complete — ready for verification
+Last activity: 2026-07-11 — Phase 01 execution started
 
 Progress: [████████░░] 80%
 
@@ -56,6 +56,7 @@ Progress: [████████░░] 80%
 
 | Phase 01 P03 | 8 min | 2 tasks | 8 files |
 | Phase 01 P04 | 10 min | 2 tasks | 8 files |
+| Phase 01 P05 | 4 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - Gateway adapters remain claim-free: a future coordinator must obtain durable ledger admission before calling `submit_order`.
 - SQLite ledger initialization fails closed on storage/configuration failures and atomically admits exactly one unresolved submission claim before any gateway side effect.
 - Recovery performs only persisted client-ID evidence lookup; empty, contradictory, and out-of-order evidence cannot grant a second admission or trigger submission.
+- [Phase ?]: OrderValidationService.validate(command) is the sole public typed-command validation boundary and fetches exactly one fresh rule observation before internal Decimal checks.
 
 ### Pending Todos
 
@@ -92,6 +94,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-11T06:47:57.775Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-07-11T09:21:10.023Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None

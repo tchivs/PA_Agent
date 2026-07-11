@@ -6,7 +6,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 ## Phases
 
-- [ ] **Phase 1: Execution Foundation** - Create the broker-neutral Decimal domain, durable SQLite lifecycle ledger, and recovery contract.
+- [x] **Phase 1: Execution Foundation** - Create the broker-neutral Decimal domain, durable SQLite lifecycle ledger, and recovery contract. (completed 2026-07-11)
 - [ ] **Phase 2: Approval And Risk Boundary** - Ensure advisory analysis can only become a durable, risk-accepted, operator-approved command.
 - [ ] **Phase 3: Paper Product Core** - Let operators execute and recover deterministic paper spot, isolated-margin, and USDT-perpetual flows.
 - [ ] **Phase 4: Local Trading Workspace** - Provide responsive PyQt configuration, approval, account-state, and kill-switch workflows.
@@ -30,12 +30,12 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/domain/`, `pa_agent/trading/ports/`, `pa_agent/trading/persistence/`, and test support under `tests/fixtures/`, `tests/unit/execution/`, `tests/property/execution/`, `tests/integration/execution/`; preserve the existing boundaries in `pa_agent/data/base.py` and `pa_agent/records/trade_logger.py`.
 **Key risks and gates**: SQLite schema/migration and single-writer behavior must be selected and tested before any gateway. All Decimal conversion happens at the gateway boundary. Stream gaps, timeouts, cancellation, and restart are reconciliation triggers, never terminal-state shortcuts.
-**Plans**: 3/4 plans executed
+**Plans**: 4/4 plans complete
 
 - [x] 01-01-PLAN.md
 - [x] 01-02-PLAN.md
 - [x] 01-03-PLAN.md
-- [ ] 01-04-PLAN.md
+- [x] 01-04-PLAN.md
 
 ### Phase 2: Approval And Risk Boundary
 
@@ -170,7 +170,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Execution Foundation | 3/4 | In Progress|  |
+| 1. Execution Foundation | 4/4 | Complete   | 2026-07-11 |
 | 2. Approval And Risk Boundary | 0/TBD | Not started | - |
 | 3. Paper Product Core | 0/TBD | Not started | - |
 | 4. Local Trading Workspace | 0/TBD | Not started | - |

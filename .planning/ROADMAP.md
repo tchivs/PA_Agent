@@ -31,10 +31,20 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 **Likely source areas**: New `pa_agent/trading/domain/`, `pa_agent/trading/ports/`, `pa_agent/trading/persistence/`, and test support under `tests/fixtures/`, `tests/unit/execution/`, `tests/property/execution/`, `tests/integration/execution/`; preserve the existing boundaries in `pa_agent/data/base.py` and `pa_agent/records/trade_logger.py`.
 **Key risks and gates**: SQLite schema/migration and single-writer behavior must be selected and tested before any gateway. All Decimal conversion happens at the gateway boundary. Stream gaps, timeouts, cancellation, and restart are reconciliation triggers, never terminal-state shortcuts.
 **Plans**: 4/4 plans complete
+**Wave 1**
 
 - [x] 01-01-PLAN.md
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [x] 01-02-PLAN.md
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [x] 01-03-PLAN.md
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [x] 01-04-PLAN.md
 
 ### Phase 2: Approval And Risk Boundary

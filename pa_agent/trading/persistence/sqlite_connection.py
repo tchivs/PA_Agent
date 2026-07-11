@@ -1,11 +1,11 @@
 """Fail-closed SQLite connection policy for the execution ledger."""
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
 import os
-from pathlib import Path
 import sqlite3
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
+from pathlib import Path
 
 
 class LedgerConfigurationError(RuntimeError):
@@ -75,10 +75,10 @@ def _apply_posix_mode(path: Path, mode: int, kind: str) -> None:
 def _configure_connection(connection: sqlite3.Connection) -> None:
     """Apply and verify every required SQLite pragma on a fresh connection."""
     try:
+        connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = FULL")
-        connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
 
         foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
@@ -114,7 +114,5 @@ def transaction(connection: sqlite3.Connection) -> Generator[sqlite3.Connection,
 
 def _rollback_quietly(connection: sqlite3.Connection) -> None:
     """Best-effort rollback without concealing the original operation failure."""
-    try:
+    with suppress(sqlite3.Error):
         connection.execute("ROLLBACK")
-    except sqlite3.Error:
-        pass

@@ -7,7 +7,12 @@ from decimal import Decimal
 
 import pytest
 
-from pa_agent.trading.domain.errors import DecimalValueError, ProductContextError
+from pa_agent.trading.domain.errors import (
+    DecimalValueError,
+    LifecycleTransitionError,
+    ProductContextError,
+)
+from pa_agent.trading.domain.lifecycle import assert_transition, is_terminal_state
 from pa_agent.trading.domain.models import (
     AccountObservation,
     Balance,
@@ -15,6 +20,7 @@ from pa_agent.trading.domain.models import (
     GatewayCapabilities,
     GatewayEvidence,
     InstrumentRules,
+    LifecycleEvent,
     IsolatedMarginOrderContext,
     OrderProjection,
     OrderState,
@@ -108,3 +114,36 @@ def test_product_contexts_reject_impossible_combinations() -> None:
         UsdtPerpetualOrderContext(leverage="3", margin_mode="cross", position_mode="one_way")
     with pytest.raises(ProductContextError):
         UsdtPerpetualOrderContext(leverage="0", margin_mode="isolated", position_mode="hedge")
+
+def test_lifecycle_accepts_definitive_evidence_and_rejects_local_terminal_claims() -> None:
+    """Only normalized gateway evidence may establish a terminal projection."""
+    acknowledged = GatewayEvidence(
+        evidence_id="ack-001",
+        client_order_id="client-order-001",
+        state=OrderState.ACKNOWLEDGED,
+        observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    filled = GatewayEvidence(
+        evidence_id="fill-001",
+        client_order_id="client-order-001",
+        state=OrderState.FILLED,
+        observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        filled_quantity="0.125",
+        average_fill_price="42000.50",
+    )
+
+    state = assert_transition(OrderState.PROPOSED, LifecycleEvent.SUBMIT_REQUESTED)
+    state = assert_transition(state, LifecycleEvent.ACKNOWLEDGEMENT_OBSERVED, evidence=acknowledged)
+    state = assert_transition(state, LifecycleEvent.FILL_OBSERVED, evidence=filled)
+
+    assert state is OrderState.FILLED
+    assert is_terminal_state(state)
+    for event in (
+        LifecycleEvent.LOCAL_TIMEOUT,
+        LifecycleEvent.LOCAL_CANCELLATION,
+        LifecycleEvent.STREAM_GAP,
+        LifecycleEvent.MALFORMED_ACKNOWLEDGEMENT,
+    ):
+        assert assert_transition(OrderState.SUBMITTING, event) is OrderState.SUBMISSION_UNKNOWN
+    with pytest.raises(LifecycleTransitionError):
+        assert_transition(OrderState.OPEN, LifecycleEvent.FILL_OBSERVED)

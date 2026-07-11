@@ -18,5 +18,5 @@ class LifecycleTransitionError(TradingDomainError, ValueError):
     """Raised when an order lifecycle event cannot legally advance its state."""
 
 
-class ReconciliationEvidenceError(TradingDomainError, ValueError):
+class ReconciliationEvidenceError(LifecycleTransitionError):
     """Raised when normalized external evidence is insufficient or contradictory."""

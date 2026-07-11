@@ -1,5 +1,5 @@
 ---
-status: complete
+status: diagnosed
 phase: 01-execution-foundation
 source:
   - 01-01-SUMMARY.md
@@ -8,7 +8,7 @@ source:
   - 01-04-SUMMARY.md
   - 01-05-SUMMARY.md
 started: 2026-07-11T10:07:56Z
-updated: 2026-07-11T10:24:37Z
+updated: 2026-07-11T10:31:38Z
 ---
 
 ## Current Test
@@ -95,7 +95,15 @@ skipped: 0
 - truth: Atomic one-claim admission serializes concurrent repeats.
   severity: blocker
   test: 6
+  root_cause: Concurrent constructors independently execute the persistent database-wide WAL transition and migration check/apply sequence; SQLite may return SQLITE_BUSY immediately to avoid a busy-handler deadlock, and no path-keyed bootstrap critical section serializes initialization.
   artifacts:
-    - pa_agent/trading/persistence/sqlite_connection.py
+    - path: pa_agent/trading/persistence/sqlite_connection.py
+      issue: `_configure_connection()` executes `PRAGMA journal_mode = WAL` independently for every fresh connection.
+    - path: pa_agent/trading/persistence/sqlite_ledger.py
+      issue: `SQLiteExecutionLedger.__init__()` configures and migrates the same database without bootstrap coordination.
+    - path: pa_agent/trading/persistence/migrations.py
+      issue: `run_migrations()` checks applied versions outside the transaction that executes migration DDL, creating a second bootstrap race.
   missing:
-    - Make concurrent SQLite connection initialization reliably serialize or retry its WAL configuration.
+    - Add a fail-closed per-canonical-path bootstrap critical section spanning SQLite policy configuration and all migrations.
+    - Add barrier-based fresh and reopened concurrent bootstrap/admission regression coverage, including migration-version and durable-row assertions.
+  debug_session: .planning/debug/sqlite-wal-init-race.md

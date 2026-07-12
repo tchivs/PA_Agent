@@ -9,7 +9,10 @@ from pa_agent.trading.domain.approval import ExecutionTarget
 from pa_agent.trading.domain.errors import RiskRejection, RiskRejectionReason
 from pa_agent.trading.domain.models import Mode, OrderType, ProductType
 from pa_agent.trading.domain.risk import RiskPolicy, select_phase2_policy
-from tests.fixtures.execution_factories import make_candidate_execution_intent, make_execution_target
+from tests.fixtures.execution_factories import (
+    make_candidate_execution_intent,
+    make_execution_target,
+)
 
 
 def test_phase2_policy_selects_only_the_explicit_paper_spot_target() -> None:

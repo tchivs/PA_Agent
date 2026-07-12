@@ -59,3 +59,42 @@ class ConversionRejection(TradingDomainError, ValueError):
     def __init__(self, reason: ConversionRejectionReason) -> None:
         self.reason = reason
         super().__init__(reason.value)
+
+
+class RiskRejectionReason(StrEnum):
+    """Stable reasons emitted by the target-bound risk boundary."""
+
+    UNSUPPORTED_TARGET = "unsupported_target"
+    TARGET_MISMATCH = "target_mismatch"
+    PRODUCT_NOT_ALLOWED = "product_not_allowed"
+    SYMBOL_NOT_ALLOWED = "symbol_not_allowed"
+    ORDER_TYPE_NOT_ALLOWED = "order_type_not_allowed"
+    ORDER_NOTIONAL_LIMIT_EXCEEDED = "order_notional_limit_exceeded"
+    OPEN_ORDER_LIMIT_EXCEEDED = "open_order_limit_exceeded"
+    ORDER_RATE_LIMIT_EXCEEDED = "order_rate_limit_exceeded"
+    REALIZED_LOSS_LIMIT_EXCEEDED = "realized_loss_limit_exceeded"
+    DRAWDOWN_LIMIT_EXCEEDED = "drawdown_limit_exceeded"
+    QUANTITY_PRECISION_INVALID = "quantity_precision_invalid"
+    PRICE_PRECISION_INVALID = "price_precision_invalid"
+    MINIMUM_QUANTITY_NOT_MET = "minimum_quantity_not_met"
+    MINIMUM_NOTIONAL_NOT_MET = "minimum_notional_not_met"
+    INSUFFICIENT_AVAILABLE_BALANCE = "insufficient_available_balance"
+    EVIDENCE_TARGET_MISMATCH = "evidence_target_mismatch"
+    EVIDENCE_ACCOUNT_MISMATCH = "evidence_account_mismatch"
+    EVIDENCE_PRODUCT_MISMATCH = "evidence_product_mismatch"
+    EVIDENCE_SYMBOL_MISMATCH = "evidence_symbol_mismatch"
+    EVIDENCE_WINDOW_INVALID = "evidence_window_invalid"
+    EVIDENCE_UTC_DAY_INVALID = "evidence_utc_day_invalid"
+    FEE_EVIDENCE_MISSING = "fee_evidence_missing"
+    FEE_EVIDENCE_STALE = "fee_evidence_stale"
+    FEE_EVIDENCE_TARGET_MISMATCH = "fee_evidence_target_mismatch"
+    FEE_EVIDENCE_SYMBOL_MISMATCH = "fee_evidence_symbol_mismatch"
+    INVALID_ECONOMIC_INPUT = "invalid_economic_input"
+
+
+class RiskRejection(TradingDomainError, ValueError):
+    """A controlled risk failure that carries one stable reason code."""
+
+    def __init__(self, reason: RiskRejectionReason) -> None:
+        self.reason = reason
+        super().__init__(reason.value)

@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from pa_agent.trading.application.risk_engine import RiskEngine
-from pa_agent.trading.domain.errors import RiskRejectionReason
+from pa_agent.trading.domain.errors import DecimalValueError, RiskRejectionReason
 from pa_agent.trading.domain.models import Balance, InstrumentRules, QuoteObservation
 from pa_agent.trading.domain.risk import (
     EvidenceBundle,
@@ -23,7 +23,6 @@ from tests.fixtures.execution_factories import (
     make_candidate_execution_intent,
     make_execution_target,
 )
-
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 
@@ -114,13 +113,8 @@ def test_risk_engine_rejects_limit_boundaries(
 @pytest.mark.parametrize(
     ("candidate_overrides", "reason"),
     (
-        ({"quantity": "0.126", "price": "8000"}, RiskRejectionReason.QUANTITY_PRECISION_INVALID),
-        ({"quantity": "0.126", "price": "8000"}, RiskRejectionReason.QUANTITY_PRECISION_INVALID),
-        ({"quantity": "0.125", "price": "8001"}, RiskRejectionReason.PRICE_PRECISION_INVALID),
-        ({"quantity": "0.126", "price": "8000"}, RiskRejectionReason.QUANTITY_PRECISION_INVALID),
-        ({"quantity": "0.126", "price": "8000"}, RiskRejectionReason.QUANTITY_PRECISION_INVALID),
-        ({"quantity": "0.126", "price": "8000"}, RiskRejectionReason.QUANTITY_PRECISION_INVALID),
-        ({"quantity": "0.126", "price": "8000"}, RiskRejectionReason.QUANTITY_PRECISION_INVALID),
+        ({"quantity": "0.1255", "price": "8000"}, RiskRejectionReason.QUANTITY_PRECISION_INVALID),
+        ({"quantity": "0.125", "price": "8001.25"}, RiskRejectionReason.PRICE_PRECISION_INVALID),
     ),
 )
 def test_risk_engine_rejects_evidence_derived_precision(
@@ -165,5 +159,5 @@ def test_fee_estimate_rejects_cross_target_or_missing_rate_binding() -> None:
     estimate = estimate_fee("0.125", "8000", fee)
 
     assert estimate.amount == Decimal("1.000")
-    with pytest.raises(ValueError):
+    with pytest.raises(DecimalValueError):
         estimate_fee("NaN", "8000", fee)

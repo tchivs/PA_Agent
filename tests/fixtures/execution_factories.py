@@ -15,6 +15,11 @@ from pa_agent.trading.domain.models import (
     Side,
     SpotOrderContext,
 )
+from pa_agent.trading.domain.approval import (
+    AnalysisRecommendation,
+    ExecutionTarget,
+    SourceAnalysisSnapshot,
+)
 
 
 def make_spot_command(**overrides: object) -> ExecutionCommand:
@@ -58,3 +63,44 @@ def make_account_observation(**overrides: object) -> AccountObservation:
     }
     values.update(overrides)
     return AccountObservation(**values)  # type: ignore[arg-type]
+
+
+def make_execution_target(**overrides: object) -> ExecutionTarget:
+    """Build the sole Phase 2 selectable Paper Spot target."""
+    values: dict[str, object] = {
+        "target_id": "paper-spot-primary",
+        "mode": Mode.PAPER,
+        "account_id": "paper-account",
+        "product": ProductType.SPOT,
+    }
+    values.update(overrides)
+    return ExecutionTarget(**values)  # type: ignore[arg-type]
+
+
+def make_analysis_recommendation(**overrides: object) -> AnalysisRecommendation:
+    """Build immutable executable decision facts without external record shapes."""
+    values: dict[str, object] = {
+        "symbol": "BTCUSDT",
+        "side": Side.BUY,
+        "order_type": OrderType.LIMIT,
+        "quantity": Decimal("0.125"),
+        "price": Decimal("42000.50"),
+        "risk_basis": Decimal("0.01"),
+    }
+    values.update(overrides)
+    return AnalysisRecommendation(**values)  # type: ignore[arg-type]
+
+
+def make_source_analysis_snapshot(**overrides: object) -> SourceAnalysisSnapshot:
+    """Build a deterministic completed snapshot for intent conversion tests."""
+    values: dict[str, object] = {
+        "source_id": "analysis-001",
+        "completed_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "schema_version": "analysis-schema-v1",
+        "parser_version": "parser-v1",
+        "decision_digest": "a" * 64,
+        "recommendation": make_analysis_recommendation(),
+        "repaired": False,
+    }
+    values.update(overrides)
+    return SourceAnalysisSnapshot(**values)  # type: ignore[arg-type]

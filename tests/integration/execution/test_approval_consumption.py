@@ -42,12 +42,13 @@ from pa_agent.trading.persistence.sqlite_connection import (
 )
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
 from pa_agent.trading.ports.gateway import GatewayUnavailableError
-from pa_agent.trading.ports.ledger import OutboundSubmission
+from pa_agent.trading.ports.ledger import OutboundDispatchPermit, OutboundSubmission
 from tests.fixtures.execution_factories import (
     make_account_observation,
     make_analysis_recommendation,
     make_execution_target,
     make_source_analysis_snapshot,
+    make_spot_command,
 )
 
 pytestmark = pytest.mark.integration
@@ -73,6 +74,7 @@ class _EvidenceAndSubmissionGateway:
         account_position_sequence: tuple[tuple[Position, ...], ...] | None = None,
         quote_sequence: tuple[QuoteObservation, ...] | None = None,
         balances: tuple[Balance, ...] | None = None,
+        fail_submit: bool = False,
     ) -> None:
         self.fail_refresh = fail_refresh
         self._account_position_sequence = (
@@ -80,6 +82,7 @@ class _EvidenceAndSubmissionGateway:
         )
         self._quote_sequence = list(quote_sequence) if quote_sequence is not None else None
         self._balances = balances or (Balance("USDT", "2000", "1500", "0"),)
+        self.fail_submit = fail_submit
         self.observed_at = NOW
         self.call_order: list[str] = []
         self.outbound_submissions: list[OutboundSubmission] = []
@@ -163,6 +166,8 @@ class _EvidenceAndSubmissionGateway:
         if type(outbound) is not OutboundSubmission:
             raise AssertionError("gateway accepts only ledger-produced OutboundSubmission values")
         self.outbound_submissions.append(outbound)
+        if self.fail_submit:
+            raise RuntimeError("injected gateway outage")
         return object()
 
 
@@ -171,7 +176,13 @@ def _row_counts(database_path: Path) -> dict[str, int]:
     try:
         return {
             table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("approval_tickets", "approval_ticket_events", "order_commands", "submission_claims")
+            for table in (
+                "approval_tickets",
+                "approval_ticket_events",
+                "order_commands",
+                "submission_claims",
+                "outbound_dispatch_attempts",
+            )
         }
     finally:
         connection.close()
@@ -224,7 +235,7 @@ def _consumer(
     )
 
 
-def test_concurrent_current_ticket_consumption_returns_one_outbound_and_one_gateway_call(
+def test_concurrent_current_ticket_consumption_returns_one_permit_and_one_gateway_call(
     execution_database_path: Path,
 ) -> None:
     """D-11 double-clicks use one immediate transaction and one outbound handoff."""
@@ -233,7 +244,7 @@ def test_concurrent_current_ticket_consumption_returns_one_outbound_and_one_gate
     ticket, candidate, policy = _issue_ticket(execution_database_path, clock, gateway)
     barrier = Barrier(2)
 
-    def consume() -> OutboundSubmission | None:
+    def consume() -> OutboundDispatchPermit | None:
         service = _consumer(execution_database_path, clock, gateway)
         try:
             barrier.wait(timeout=2)
@@ -244,11 +255,11 @@ def test_concurrent_current_ticket_consumption_returns_one_outbound_and_one_gate
     with ThreadPoolExecutor(max_workers=2) as executor:
         outbounds = list(executor.map(lambda _: consume(), range(2)))
 
-    outbound = next(result for result in outbounds if result is not None)
+    permit = next(result for result in outbounds if result is not None)
     assert sum(result is not None for result in outbounds) == 1
     outbound_ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     try:
-        SubmissionCoordinator(ledger=outbound_ledger, gateway=gateway).submit(outbound)
+        SubmissionCoordinator(ledger=outbound_ledger, gateway=gateway).submit(permit)
     finally:
         outbound_ledger.close()
     assert _row_counts(execution_database_path) == {
@@ -256,9 +267,10 @@ def test_concurrent_current_ticket_consumption_returns_one_outbound_and_one_gate
         "approval_ticket_events": 2,
         "order_commands": 1,
         "submission_claims": 1,
+        "outbound_dispatch_attempts": 1,
     }
     assert len(gateway.outbound_submissions) == 1
-    assert gateway.outbound_submissions[0].client_order_id == outbound.client_order_id
+    assert gateway.outbound_submissions[0].client_order_id == permit.client_order_id
 
 
 @pytest.mark.parametrize("side", (Side.BUY, Side.SELL))
@@ -281,14 +293,14 @@ def test_market_ticket_consumes_once_with_fresh_side_specific_evidence(
     )
     service = _consumer(execution_database_path, clock, gateway)
     try:
-        outbound = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        permit = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
         assert service._ledger.list_approval_tickets()[0].status.value == "consumed"
-        SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(outbound)
+        SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(permit)
     finally:
         service.close()
 
     assert candidate.price is None
-    assert outbound is not None
+    assert type(permit) is OutboundDispatchPermit
     assert len(gateway.outbound_submissions) == 1
 
 
@@ -305,9 +317,9 @@ def test_t0_to_t0_plus_one_equivalent_fresh_evidence_consumes_once(
     gateway.observed_at = clock.now
     service = _consumer(execution_database_path, clock, gateway)
     try:
-        outbound = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
-        assert outbound is not None
-        SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(outbound)
+        permit = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        assert type(permit) is OutboundDispatchPermit
+        SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(permit)
         assert service._ledger.list_approval_tickets()[0].status.value == "consumed"
     finally:
         service.close()
@@ -333,6 +345,7 @@ def test_t0_to_t0_plus_one_equivalent_fresh_evidence_consumes_once(
         "approval_ticket_events": 2,
         "order_commands": 1,
         "submission_claims": 1,
+        "outbound_dispatch_attempts": 1,
     }
     assert len(evidence_rows) == 2
     assert evidence_rows[0][0] == issued_evidence_digest
@@ -415,6 +428,7 @@ def test_noncurrent_ticket_attempts_terminate_without_claim_or_gateway_submissio
         "approval_ticket_events": 2,
         "order_commands": 0,
         "submission_claims": 0,
+        "outbound_dispatch_attempts": 0,
     }
     assert gateway.outbound_submissions == []
     connection = open_sqlite_connection(execution_database_path)
@@ -461,6 +475,7 @@ def test_refreshed_over_limit_exposure_invalidates_ticket_before_outbound_author
         "approval_ticket_events": 2,
         "order_commands": 0,
         "submission_claims": 0,
+        "outbound_dispatch_attempts": 0,
     }
     assert gateway.outbound_submissions == []
     connection = open_sqlite_connection(execution_database_path)
@@ -515,6 +530,7 @@ def test_refreshed_over_limit_quote_metrics_invalidate_ticket_before_outbound_au
         "approval_ticket_events": 2,
         "order_commands": 0,
         "submission_claims": 0,
+        "outbound_dispatch_attempts": 0,
     }
     assert gateway.outbound_submissions == []
     connection = open_sqlite_connection(execution_database_path)
@@ -561,5 +577,136 @@ def test_injected_consumption_failure_rolls_back_ticket_command_and_outbound_sta
         "approval_ticket_events": 1,
         "order_commands": 0,
         "submission_claims": 0,
+        "outbound_dispatch_attempts": 0,
     }
     assert gateway.outbound_submissions == []
+
+
+def test_legacy_outbound_submission_is_rejected_before_lease_or_gateway_mutation(
+    execution_database_path: Path,
+) -> None:
+    """A field-consistent public legacy value cannot bypass durable proof leasing."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    command = make_spot_command(
+        command_id="legacy-command",
+        client_order_id="legacy-client",
+        logical_command_key="legacy-logical-command",
+    )
+    legacy = OutboundSubmission(
+        command=command,
+        command_id=command.command_id,
+        client_order_id=command.client_order_id,
+        reconciliation_job_id="legacy-job",
+        outbound_attempt_token="legacy-attempt",
+    )
+    before = _row_counts(execution_database_path)
+    try:
+        with pytest.raises((TypeError, LedgerStorageError)):
+            SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(legacy)
+    finally:
+        ledger.close()
+
+    assert gateway.outbound_submissions == []
+    assert _row_counts(execution_database_path) == before
+
+
+def test_only_persisted_current_permit_can_dispatch_once(
+    execution_database_path: Path,
+) -> None:
+    """A real consumed permit leases exactly once; forged identities and proof do not."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway()
+    ticket, candidate, policy = _issue_ticket(execution_database_path, clock, gateway)
+    service = _consumer(execution_database_path, clock, gateway)
+    try:
+        permit = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        assert type(permit) is OutboundDispatchPermit
+        coordinator = SubmissionCoordinator(ledger=service._ledger, gateway=gateway)
+        before = _row_counts(execution_database_path)
+        forged_permits = (
+            replace(permit, outbound_attempt_proof="forged-proof"),
+            replace(permit, command_id="forged-command"),
+            replace(permit, client_order_id="forged-client"),
+            replace(permit, reconciliation_job_id="forged-job"),
+        )
+        for forged in forged_permits:
+            with pytest.raises(LedgerStorageError):
+                coordinator.submit(forged)
+            assert gateway.outbound_submissions == []
+            assert _row_counts(execution_database_path) == before
+
+        coordinator.submit(permit)
+        assert len(gateway.outbound_submissions) == 1
+        with pytest.raises(LedgerStorageError):
+            coordinator.submit(permit)
+        assert len(gateway.outbound_submissions) == 1
+    finally:
+        service.close()
+
+
+def test_expired_and_restart_reloaded_permits_cannot_dispatch(
+    execution_database_path: Path,
+) -> None:
+    """Expiry and a reopened leased proof remain fail-closed with zero gateway calls."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway()
+    ticket, candidate, policy = _issue_ticket(execution_database_path, clock, gateway)
+    service = _consumer(execution_database_path, clock, gateway)
+    try:
+        permit = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        assert type(permit) is OutboundDispatchPermit
+        clock.now = NOW + timedelta(seconds=61)
+        with pytest.raises(LedgerStorageError):
+            SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(permit)
+        assert gateway.outbound_submissions == []
+    finally:
+        service.close()
+
+    fresh_clock = _Clock(NOW)
+    fresh_gateway = _EvidenceAndSubmissionGateway()
+    fresh_ticket, fresh_candidate, fresh_policy = _issue_ticket(
+        execution_database_path, fresh_clock, fresh_gateway
+    )
+    fresh_service = _consumer(execution_database_path, fresh_clock, fresh_gateway)
+    try:
+        fresh_permit = fresh_service.consume_ticket(
+            fresh_ticket.ticket_id, fresh_candidate, fresh_candidate.target, fresh_policy
+        )
+        assert type(fresh_permit) is OutboundDispatchPermit
+        SubmissionCoordinator(ledger=fresh_service._ledger, gateway=fresh_gateway).submit(fresh_permit)
+    finally:
+        fresh_service.close()
+
+    reopened_gateway = _EvidenceAndSubmissionGateway()
+    reopened_ledger = SQLiteExecutionLedger(execution_database_path, clock=fresh_clock)
+    try:
+        with pytest.raises(LedgerStorageError):
+            SubmissionCoordinator(ledger=reopened_ledger, gateway=reopened_gateway).submit(fresh_permit)
+    finally:
+        reopened_ledger.close()
+
+    assert reopened_gateway.outbound_submissions == []
+
+
+def test_post_lease_gateway_failure_records_ambiguity_without_replacement_dispatch(
+    execution_database_path: Path,
+) -> None:
+    """A gateway exception follows a lease and leaves only reconciliation recovery."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway(fail_submit=True)
+    ticket, candidate, policy = _issue_ticket(execution_database_path, clock, gateway)
+    service = _consumer(execution_database_path, clock, gateway)
+    try:
+        permit = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        assert type(permit) is OutboundDispatchPermit
+        coordinator = SubmissionCoordinator(ledger=service._ledger, gateway=gateway)
+        with pytest.raises(RuntimeError, match="injected gateway outage"):
+            coordinator.submit(permit)
+        with pytest.raises(LedgerStorageError):
+            coordinator.submit(permit)
+        assert len(gateway.outbound_submissions) == 1
+        assert service._ledger.list_unresolved_reconciliation_jobs()[0].lifecycle_state.value == "submission_unknown"
+    finally:
+        service.close()

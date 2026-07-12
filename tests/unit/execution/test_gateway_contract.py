@@ -238,7 +238,7 @@ def test_ticket_consumption_contract_prepares_a_permit_not_forgery_blocking() ->
 
 
 def test_ledger_lease_contract_is_the_only_future_gateway_value_source() -> None:
-    """Contract preparation reserves durable proof consumption for the next plan."""
+    """A durable lease is the sole source of a gateway-facing value."""
     assert get_type_hints(ExecutionLedger.lease_outbound_submission) == {
         "permit": OutboundDispatchPermit,
         "return": OutboundSubmission,
@@ -248,7 +248,7 @@ def test_ledger_lease_contract_is_the_only_future_gateway_value_source() -> None
     assert "one-time" in contract
     assert "durable" in contract
     assert "rowcount" in contract
-    assert "future ledger implementation" in contract.lower()
+    assert "conditional rowcount" in contract.lower()
 
     submit_parameters = signature(TradingGateway.submit_order).parameters
     assert tuple(submit_parameters) == ("self", "outbound")

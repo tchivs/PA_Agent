@@ -15,6 +15,7 @@ from pa_agent.trading.application.intent_factory import IntentFactory
 from pa_agent.trading.application.proposal import ProposalService
 from pa_agent.trading.application.risk_engine import RiskEngine
 from pa_agent.trading.application.submission import SubmissionCoordinator
+from pa_agent.trading.domain.approval import TicketRiskResult
 from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
@@ -79,6 +80,7 @@ class _EvidenceAndSubmissionGateway:
         )
         self._quote_sequence = list(quote_sequence) if quote_sequence is not None else None
         self._balances = balances or (Balance("USDT", "2000", "1500", "0"),)
+        self.observed_at = NOW
         self.call_order: list[str] = []
         self.outbound_submissions: list[OutboundSubmission] = []
 
@@ -93,7 +95,9 @@ class _EvidenceAndSubmissionGateway:
 
     def get_instrument_rules(self, symbol: str) -> RuleObservation:
         self._record("rules")
-        return RuleObservation(InstrumentRules(symbol, "0.50", "0.001", "0.001", "10"), NOW)
+        return RuleObservation(
+            InstrumentRules(symbol, "0.50", "0.001", "0.001", "10"), self.observed_at
+        )
 
     def get_account_snapshot(self, account_id: str, product: ProductType) -> object:
         self._record("account")
@@ -105,7 +109,7 @@ class _EvidenceAndSubmissionGateway:
         return make_account_observation(
             account_id=account_id,
             product=product,
-            observed_at=NOW,
+            observed_at=self.observed_at,
             balances=self._balances,
             positions=positions,
         )
@@ -116,31 +120,40 @@ class _EvidenceAndSubmissionGateway:
             if not self._quote_sequence:
                 raise AssertionError("unexpected quote lookup")
             return self._quote_sequence.pop(0)
-        return QuoteObservation(symbol, "7999.50", "8000", NOW)
+        return QuoteObservation(symbol, "7999.50", "8000", self.observed_at)
 
     def get_server_time(self) -> TimeObservation:
         self._record("server_time")
-        return TimeObservation(server_time=NOW, observed_at=NOW)
+        return TimeObservation(server_time=self.observed_at, observed_at=self.observed_at)
 
     def get_connection(self, target: object) -> object:
         self._record("connection")
-        return TargetConnectionObservation(target, True, NOW)
+        return TargetConnectionObservation(target, True, self.observed_at)
 
     def get_open_order_count(self, target: object) -> object:
         self._record("open_orders")
-        return OpenOrderObservation(target, 2, NOW)
+        return OpenOrderObservation(target, 2, self.observed_at)
 
     def get_order_rate_window(self, target: object, window_seconds: int) -> object:
         self._record("order_rate")
-        return OrderRateObservation(target, 4, NOW - timedelta(seconds=window_seconds), NOW)
+        return OrderRateObservation(
+            target,
+            4,
+            self.observed_at - timedelta(seconds=window_seconds),
+            self.observed_at,
+        )
 
     def get_loss_drawdown(self, target: object) -> object:
         self._record("loss_drawdown")
-        return LossDrawdownObservation(target, "99", "0.09", NOW.replace(hour=0), NOW)
+        return LossDrawdownObservation(
+            target, "99", "0.09", self.observed_at.replace(hour=0), self.observed_at
+        )
 
     def get_fee_rate(self, target: object, symbol: str, quote_identifier: str) -> object:
         self._record("fee_rate")
-        return FeeRateObservation(target, symbol, quote_identifier, "USDT", "0.001", "fees-v1", NOW)
+        return FeeRateObservation(
+            target, symbol, quote_identifier, "USDT", "0.001", "fees-v1", self.observed_at
+        )
 
     def submit_order(self, outbound: OutboundSubmission) -> object:
         if type(outbound) is not OutboundSubmission:
@@ -273,6 +286,104 @@ def test_market_ticket_consumes_once_with_fresh_side_specific_evidence(
     assert candidate.price is None
     assert outbound is not None
     assert len(gateway.outbound_submissions) == 1
+
+
+def test_t0_to_t0_plus_one_equivalent_fresh_evidence_consumes_once(
+    execution_database_path: Path,
+) -> None:
+    """Only a complete, unchanged one-second refresh may consume one ticket."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway()
+    ticket, candidate, policy = _issue_ticket(execution_database_path, clock, gateway)
+    issued_evidence_digest = ticket.binding.evidence_digest
+
+    clock.now = NOW + timedelta(seconds=1)
+    gateway.observed_at = clock.now
+    service = _consumer(execution_database_path, clock, gateway)
+    try:
+        outbound = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        assert outbound is not None
+        SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(outbound)
+        assert service._ledger.list_approval_tickets()[0].status.value == "consumed"
+    finally:
+        service.close()
+
+    connection = open_sqlite_connection(execution_database_path)
+    try:
+        evidence_rows = connection.execute(
+            "SELECT evidence_digest FROM proposal_evidence ORDER BY rowid"
+        ).fetchall()
+        assessment_rows = connection.execute(
+            "SELECT assessment_id FROM proposal_risk_assessments ORDER BY rowid"
+        ).fetchall()
+        event_rows = connection.execute(
+            "SELECT event_type FROM approval_ticket_events WHERE ticket_id = ? ORDER BY rowid",
+            (ticket.ticket_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert len(gateway.outbound_submissions) == 1
+    assert _row_counts(execution_database_path) == {
+        "approval_tickets": 1,
+        "approval_ticket_events": 2,
+        "order_commands": 1,
+        "submission_claims": 1,
+    }
+    assert len(evidence_rows) == 2
+    assert evidence_rows[0][0] == issued_evidence_digest
+    assert evidence_rows[0][0] != evidence_rows[1][0]
+    assert len(assessment_rows) == 2
+    assert event_rows == [("issued",), ("consumed",)]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "current"),
+    (
+        ("candidate", lambda binding: replace(binding, candidate_digest="changed-candidate")),
+        ("source", lambda binding: replace(binding, source_digest="changed-source")),
+        ("target", lambda binding: replace(binding, target_digest="changed-target")),
+        ("policy", lambda binding: replace(binding, policy_digest="changed-policy")),
+        ("capabilities", lambda binding: replace(binding, authorization_evidence_digest="changed-capabilities")),
+        ("rules", lambda binding: replace(binding, authorization_evidence_digest="changed-rules")),
+        ("account", lambda binding: replace(binding, authorization_evidence_digest="changed-account")),
+        ("quote", lambda binding: replace(binding, quote_digest="changed-quote")),
+        ("fee", lambda binding: replace(binding, fee_rate_digest="changed-fee")),
+        ("open-order", lambda binding: replace(binding, authorization_evidence_digest="changed-open-orders")),
+        ("rate", lambda binding: replace(binding, authorization_evidence_digest="changed-order-rate")),
+        ("loss-drawdown", lambda binding: replace(binding, authorization_evidence_digest="changed-loss")),
+        ("quantity", lambda binding: replace(binding, amount=binding.amount + 1)),
+        ("expected-price", lambda binding: replace(binding, expected_price=binding.expected_price + 1)),
+        ("fee-amount", lambda binding: replace(binding, estimated_fee=binding.estimated_fee + 1)),
+        ("slippage", lambda binding: replace(binding, slippage=binding.slippage + 1)),
+        (
+            "risk-result",
+            lambda binding: replace(
+                binding,
+                risk_result=TicketRiskResult(
+                    accepted=False,
+                    reason_codes=("changed-risk",),
+                    metrics=binding.risk_result.metrics,
+                ),
+            ),
+        ),
+        ("stale", lambda binding: replace(binding, data_observed_at=NOW - timedelta(seconds=61))),
+    ),
+)
+def test_authorization_equivalence_rejects_every_d10_binding_mutation(
+    execution_database_path: Path,
+    mutation: str,
+    current: object,
+) -> None:
+    """D-10 remains exact for every authorization fact other than fresh timestamps."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway()
+    ticket, _, policy = _issue_ticket(execution_database_path, clock, gateway)
+    changed_binding = current(ticket.binding)
+
+    assert ticket.binding.is_authorization_equivalent_to(
+        changed_binding, policy=policy, now=NOW + timedelta(seconds=1)
+    ) is False, mutation
 
 
 @pytest.mark.parametrize("mode", ["expired", "binding_changed", "refresh_failed"])

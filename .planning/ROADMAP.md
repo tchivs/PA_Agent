@@ -6,7 +6,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 ## Phases
 
-- [ ] **Phase 1: Execution Foundation** - Create the broker-neutral Decimal domain, durable SQLite lifecycle ledger, and recovery contract. (gap closure planned 2026-07-11)
+- [x] **Phase 1: Execution Foundation** - Create the broker-neutral Decimal domain, durable SQLite lifecycle ledger, and recovery contract. (verified 2026-07-11)
 - [ ] **Phase 2: Approval And Risk Boundary** - Ensure advisory analysis can only become a durable, risk-accepted, operator-approved command.
 - [ ] **Phase 3: Paper Product Core** - Let operators execute and recover deterministic paper spot, isolated-margin, and USDT-perpetual flows.
 - [ ] **Phase 4: Local Trading Workspace** - Provide responsive PyQt configuration, approval, account-state, and kill-switch workflows.
@@ -30,15 +30,15 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/domain/`, `pa_agent/trading/ports/`, `pa_agent/trading/persistence/`, and test support under `tests/fixtures/`, `tests/unit/execution/`, `tests/property/execution/`, `tests/integration/execution/`; preserve the existing boundaries in `pa_agent/data/base.py` and `pa_agent/records/trade_logger.py`.
 **Key risks and gates**: SQLite schema/migration and single-writer behavior must be selected and tested before any gateway. All Decimal conversion happens at the gateway boundary. Stream gaps, timeouts, cancellation, and restart are reconciliation triggers, never terminal-state shortcuts.
-**Plans**: 6/8 plans executed
+**Plans**: 8/8 plans executed
 
 - [x] 01-05-PLAN.md
 
 **Gap closure plans**
 
 - [x] 01-06-PLAN.md — Enforce strict canonical ingress and publish durable identity/outbound contracts.
-- [ ] 01-07-PLAN.md — Implement generated IDs, durable fill projections, typed observations, and protected outbound authorization.
-- [ ] 01-08-PLAN.md — Serialize SQLite WAL/migration bootstrap and prove fresh/reopened concurrent initialization.
+- [x] 01-07-PLAN.md — Implement generated IDs, durable fill projections, typed observations, and protected outbound authorization.
+- [x] 01-08-PLAN.md — Serialize SQLite WAL/migration bootstrap and prove fresh/reopened concurrent initialization.
 
 **Gap Closure Wave 6** *(blocked on 01-05 completion)*
 
@@ -46,11 +46,11 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Gap Closure Wave 7** *(blocked on Gap Closure Wave 6)*
 
-- [ ] 01-07-PLAN.md
+- [x] 01-07-PLAN.md
 
 **Gap Closure Wave 8** *(blocked on Gap Closure Wave 7)*
 
-- [ ] 01-08-PLAN.md
+- [x] 01-08-PLAN.md
 
 **Wave 1**
 
@@ -83,7 +83,17 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/application/intent_factory.py`, `risk_engine.py`, `execution_coordinator.py`, `reconciler.py`, `security/`; extend non-secret settings through `pa_agent/config/settings.py`; integrate from `pa_agent/app_context.py` without adding execution behavior to `pa_agent/gui/main_window.py`, `pa_agent/gui/order_opportunity.py`, or `pa_agent/notify/`.
 **Key risks and gates**: The existing Stage 2 payload and alert pipeline must never receive a submission capability. Product context carries leverage, borrow/repay, margin mode, and position mode; leverage is not a generic order field. Fresh exchange evidence is mandatory before submit, and failed evidence rejects rather than using cached values.
-**Plans**: TBD
+**Plans**: 8 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Define immutable analysis snapshots and deterministic candidate conversion.
+- [ ] 02-02-PLAN.md — Add credential references, recursive redaction, and non-secret settings.
+- [ ] 02-03-PLAN.md — Define selected-target product risk policies and pure risk assessment.
+- [ ] 02-04-PLAN.md — Refresh complete evidence and persist controlled proposal/risk audit outcomes.
+- [ ] 02-05-PLAN.md — Persist controlled proposal, rejection, evidence, and risk-audit records.
+- [ ] 02-08-PLAN.md — Issue exactly one pending approval ticket from persisted eligible proposal facts and manage its lifecycle.
+- [ ] 02-07-PLAN.md — Atomically consume a current approval ticket into the sole outbound authorization.
+- [ ] 02-06-PLAN.md — Latch, recover, and verify the persistent kill-switch boundary.
 
 ### Phase 3: Paper Product Core
 
@@ -201,8 +211,8 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Execution Foundation | 6/8 | In Progress|  |
-| 2. Approval And Risk Boundary | 0/TBD | Not started | - |
+| 1. Execution Foundation | 8/8 | Complete | 2026-07-11 |
+| 2. Approval And Risk Boundary | 0/8 | Not started | - |
 | 3. Paper Product Core | 0/TBD | Not started | - |
 | 4. Local Trading Workspace | 0/TBD | Not started | - |
 | 5. Binance Spot Testnet | 0/TBD | Not started | - |

@@ -4,16 +4,17 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01
 current_phase_name: execution-foundation
-status: verifying
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-07-11T10:58:10.681Z"
+status: complete
+stopped_at: Phase 2 context gathered
+last_updated: "2026-07-12T04:29:39.866Z"
 last_activity: 2026-07-11
-last_activity_desc: Phase 01 execution started
+last_activity_desc: Phase 01 verification passed
 progress:
-  total_phases: 1
+  total_phases: 7
   completed_phases: 0
   total_plans: 9
-  completed_plans: 6
+  completed_plans: 8
+  percent: 0
 ---
 
 # Project State
@@ -23,16 +24,16 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-07-11)
 
 **Core value:** An operator can safely turn a validated analysis recommendation into an explicitly approved, traceable order without coupling strategy logic to a particular exchange.
-**Current focus:** Phase 01 — execution-foundation
+**Current focus:** Phase 01 — execution-foundation complete
 
 ## Current Position
 
-Phase: 01 (execution-foundation) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
-Last activity: 2026-07-11 — Phase 01 execution started
+Phase: 01 (execution-foundation) — COMPLETE
+Plan: 8 of 8
+Status: Verified — 10/10 must-haves passed
+Last activity: 2026-07-11 — Phase 01 verification passed
 
-Progress: [████████░░] 80%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -57,6 +58,8 @@ Progress: [████████░░] 80%
 | Phase 01 P04 | 10 min | 2 tasks | 8 files |
 | Phase 01 P05 | 4 min | 2 tasks | 6 files |
 | Phase 01 P06 | 5 min | 2 tasks | 9 files |
+| Phase 01 P07 | 5 min | 2 tasks | 6 files |
+| Phase 01 P08 | 5 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -76,6 +79,11 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase ?]: OrderValidationService.validate(command) is the sole public typed-command validation boundary and fetches exactly one fresh rule observation before internal Decimal checks.
 - [Phase ?]: Public execution ingress rejects raw enum/context shapes rather than normalizing untrusted inputs.
 - [Phase ?]: The ledger owns durable client-ID allocation and creates the irreversible authorization required by gateway submission.
+- [Phase ?]: SQLite allocates and persists the sole opaque client-order ID at initial admission; caller candidates are never durable remote identity.
+- [Phase ?]: Outbound authority is irreversibly transitioned to outbound_started before the abstract gateway call; later ambiguity queues reconciliation but cannot reauthorize submission.
+- [Phase ?]: SQLite bootstrap uses a process-local lock keyed by Path.resolve(strict=False) so equivalent path spellings serialize without blocking distinct databases.
+- [Phase ?]: Each SQLite migration reads its applied version inside the same immediate transaction as DDL and schema metadata insertion.
+- [Phase ?]: SQLiteExecutionLedger obtains usable connections only from guarded bootstrap, retaining fail-closed WAL, FULL, foreign-key, and busy-timeout policy.
 
 ### Pending Todos
 
@@ -96,6 +104,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-11T10:58:10.673Z
-Stopped at: Completed 01-06-PLAN.md
-Resume file: None
+Last session: 2026-07-12T04:29:39.859Z
+Stopped at: Phase 2 context gathered
+Resume file: .planning/phases/02-approval-and-risk-boundary/02-CONTEXT.md

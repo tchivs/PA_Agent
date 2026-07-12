@@ -1,5 +1,5 @@
 ---
-status: diagnosed
+status: passed
 phase: 01-execution-foundation
 source:
   - 01-01-SUMMARY.md
@@ -8,7 +8,7 @@ source:
   - 01-04-SUMMARY.md
   - 01-05-SUMMARY.md
 started: 2026-07-11T10:07:56Z
-updated: 2026-07-11T10:31:38Z
+updated: 2026-07-11T13:06:05Z
 ---
 
 ## Current Test
@@ -49,10 +49,10 @@ coverage_id: D1
 
 ### 6. Atomic one-claim admission that survives restart, serializes concurrent repeats, and preserves contradictory fill evidence
 expected: Atomic one-claim admission that survives restart, serializes concurrent repeats, and preserves contradictory fill evidence.
-result: issue
+result: pass
 source: automated
 coverage_id: D2
-failure: Fresh full execution test run failed because concurrent SQLite connection initialization raised `LedgerConfigurationError` on a locked `PRAGMA journal_mode = WAL`.
+evidence: Fresh and reopened four-worker SQLite bootstrap/admission regressions passed in the Phase 01 focused corpus (69 passed).
 
 ### 7. Evidence-only recovery retains uncertainty across timeout, cancellation, gap, malformed acknowledgement, and restart while querying only original client IDs
 expected: Evidence-only recovery retains uncertainty across timeout, cancellation, gap, malformed acknowledgement, and restart while querying only original client IDs.
@@ -85,25 +85,8 @@ result: pass
 ## Summary
 
 total: 11
-passed: 10
-issues: 1
+passed: 11
+issues: 0
 pending: 0
 skipped: 0
 
-## Gaps
-
-- truth: Atomic one-claim admission serializes concurrent repeats.
-  severity: blocker
-  test: 6
-  root_cause: Concurrent constructors independently execute the persistent database-wide WAL transition and migration check/apply sequence; SQLite may return SQLITE_BUSY immediately to avoid a busy-handler deadlock, and no path-keyed bootstrap critical section serializes initialization.
-  artifacts:
-    - path: pa_agent/trading/persistence/sqlite_connection.py
-      issue: `_configure_connection()` executes `PRAGMA journal_mode = WAL` independently for every fresh connection.
-    - path: pa_agent/trading/persistence/sqlite_ledger.py
-      issue: `SQLiteExecutionLedger.__init__()` configures and migrates the same database without bootstrap coordination.
-    - path: pa_agent/trading/persistence/migrations.py
-      issue: `run_migrations()` checks applied versions outside the transaction that executes migration DDL, creating a second bootstrap race.
-  missing:
-    - Add a fail-closed per-canonical-path bootstrap critical section spanning SQLite policy configuration and all migrations.
-    - Add barrier-based fresh and reopened concurrent bootstrap/admission regression coverage, including migration-version and durable-row assertions.
-  debug_session: .planning/debug/sqlite-wal-init-race.md

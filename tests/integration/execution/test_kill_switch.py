@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from pa_agent.trading.application.kill_switch import KillSwitchService
 from pa_agent.trading.application.recovery import RecoveryService
-from pa_agent.trading.domain.approval import KillSwitchStatus
+from pa_agent.trading.domain.approval import (
+    KillSwitchStatus,
+    RecoveryAssessment,
+    RecoveryScope,
+)
 from pa_agent.trading.domain.models import (
     AccountObservation,
     GatewayCapabilities,
@@ -189,4 +193,107 @@ def test_latch_rejects_new_ticket_consumption_and_preserves_existing_client_iden
         assert connection.execute("SELECT COUNT(*) FROM cancellation_work").fetchone()[0] == 1
     finally:
         connection.close()
+        ledger.close()
+
+
+def _recovery_assessment_for(
+    scope: RecoveryScope,
+    *,
+    accepted: bool = True,
+    observed_at: datetime = NOW,
+    evidence_digest: str = "recovery-evidence-current",
+) -> RecoveryAssessment:
+    """Build a caller-held clearance assertion that SQLite must independently verify."""
+    return RecoveryAssessment(
+        recovery_assessment_id=None,
+        persistent_scope_id=scope.persistent_scope_id,
+        scope_digest=scope.scope_digest,
+        target_digest=scope.target_digest,
+        policy_version=scope.policy_version,
+        policy_digest=scope.policy_digest,
+        evidence_digest=evidence_digest,
+        evidence_json='{"complete":true}',
+        accepted=accepted,
+        reason_codes=() if accepted else ("unresolved_exposure",),
+        observed_at=observed_at,
+    )
+
+
+def test_recovery_scope_assessment_ids_are_the_only_path_to_ready(
+    execution_database_path: Path,
+) -> None:
+    """Both durable recovery transitions must independently verify the same scope-ID set."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    try:
+        client_order_id = _create_open_order(ledger)
+        gateway = _CancellationGateway(
+            {
+                client_order_id: GatewayEvidence(
+                    evidence_id="terminal-before-assessment",
+                    client_order_id=client_order_id,
+                    state=OrderState.CANCELLED,
+                    observed_at=NOW,
+                )
+            }
+        )
+        service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        service.process_cancellation_work()
+        RecoveryService(ledger=ledger, gateway=gateway).recover_startup()
+
+        scope = ledger.list_kill_switch_recovery_scopes()[0]
+        assessment = _recovery_assessment_for(scope)
+        persisted = ledger.record_recovery_assessment(scope, assessment)
+
+        assert persisted is not None
+        assert service.begin_recovery("operator-1", assessment_ids=(persisted.recovery_assessment_id,))
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
+        assert not service.complete_recovery("operator-1", assessment_ids=("forged-assessment-id",))
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
+        assert service.complete_recovery("operator-1", assessment_ids=(persisted.recovery_assessment_id,))
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.READY
+        assert gateway.submit_call_count == 0
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("scope_override", "assessment_override"),
+    [
+        ({"persistent_scope_id": "invented-scope"}, {}),
+        ({"scope_digest": "tampered-scope"}, {}),
+        ({"target_digest": "tampered-target"}, {}),
+        ({"policy_digest": "tampered-policy"}, {}),
+        ({}, {"evidence_digest": "tampered-evidence"}),
+        ({}, {"accepted": False}),
+        ({}, {"observed_at": NOW - timedelta(seconds=61)}),
+    ],
+)
+def test_forged_or_cross_boundary_recovery_assessment_never_writes_or_recovers(
+    execution_database_path: Path,
+    scope_override: dict[str, object],
+    assessment_override: dict[str, object],
+) -> None:
+    """Caller-built scope or assessment values cannot mint authority while latched."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    try:
+        client_order_id = _create_open_order(ledger)
+        gateway = _CancellationGateway({client_order_id: None})
+        service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        scope = ledger.list_kill_switch_recovery_scopes()[0]
+        supplied_scope = replace(scope, **scope_override)
+        supplied_assessment = replace(_recovery_assessment_for(supplied_scope), **assessment_override)
+
+        before = ledger.count_recovery_assessments()
+        persisted = ledger.record_recovery_assessment(supplied_scope, supplied_assessment)
+
+        assert persisted is None
+        assert ledger.count_recovery_assessments() == before
+        assert not service.begin_recovery("operator-1", assessment_ids=("forged-assessment-id",))
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
+        assert gateway.submit_call_count == 0
+    finally:
         ledger.close()

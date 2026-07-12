@@ -16,7 +16,7 @@ from hypothesis.stateful import (
 )
 
 from pa_agent.trading.application.kill_switch import KillSwitchService
-from pa_agent.trading.domain.approval import KillSwitchStatus
+from pa_agent.trading.domain.approval import KillSwitchStatus, RecoveryAssessment
 from pa_agent.trading.persistence.sqlite_connection import (
     LedgerStorageError,
     open_sqlite_connection,
@@ -77,6 +77,32 @@ class ApprovalKillSwitchMachine(RuleBasedStateMachine):
         with pytest.raises(LedgerStorageError, match="kill switch"):
             self._ledger.create_or_load_and_claim_submission(make_spot_command())
 
+    @rule()
+    @precondition(lambda self: self._latched)
+    def forged_recovery_id_cannot_reopen_after_restart(self) -> None:
+        """A caller-held opaque-looking ID cannot become valid across process lifetime."""
+        assert not self._service.begin_recovery("operator-1", assessment_ids=("forged",))
+        assert not self._service.complete_recovery("operator-1", assessment_ids=("forged",))
+
+    @rule()
+    @precondition(lambda self: self._latched)
+    def caller_constructed_assessment_cannot_be_recorded(self) -> None:
+        """The ledger must reject the fabricated scope identity before allocating an ID."""
+        fabricated = RecoveryAssessment(
+            recovery_assessment_id=None,
+            persistent_scope_id="fabricated-scope",
+            scope_digest="fabricated-digest",
+            target_digest="fabricated-target",
+            policy_version="phase2-v1",
+            policy_digest="fabricated-policy",
+            evidence_digest="fabricated-evidence",
+            evidence_json='{"complete":true}',
+            accepted=True,
+            reason_codes=(),
+            observed_at=datetime(2026, 7, 12, tzinfo=UTC),
+        )
+        assert self._ledger.record_recovery_assessment(None, fabricated) is None
+
     @invariant()
     def latched_state_persists_and_blocks_new_authority(self) -> None:
         state = self._ledger.get_kill_switch_state()
@@ -84,6 +110,7 @@ class ApprovalKillSwitchMachine(RuleBasedStateMachine):
         if self._latched:
             with pytest.raises(LedgerStorageError, match="kill switch"):
                 self._ledger.create_or_load_and_claim_submission(make_spot_command())
+            assert self._gateway.submit_call_count == 0
         connection = open_sqlite_connection(self._database_path)
         try:
             assert connection.execute("SELECT COUNT(*) FROM submission_claims").fetchone()[0] <= 1

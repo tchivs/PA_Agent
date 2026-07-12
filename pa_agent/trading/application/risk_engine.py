@@ -84,6 +84,21 @@ class RiskEngine:
         if evidence.loss_drawdown.drawdown >= policy.maximum_utc_day_drawdown:
             reasons.append(RiskRejectionReason.DRAWDOWN_LIMIT_EXCEEDED)
 
+        existing_exposure = Decimal("0")
+        for position in evidence.account.positions:
+            if position.symbol != candidate.symbol:
+                continue
+            try:
+                position_quantity = decimal_from_canonical(position.quantity)
+                position_mark_price = decimal_from_canonical(position.mark_price)
+            except Exception:
+                reasons.append(RiskRejectionReason.INVALID_ECONOMIC_INPUT)
+                continue
+            existing_exposure += abs(position_quantity) * abs(position_mark_price)
+        projected_exposure = existing_exposure + notional
+        if projected_exposure > policy.maximum_total_exposure:
+            reasons.append(RiskRejectionReason.EXPOSURE_LIMIT_EXCEEDED)
+
         expected_quote_price = evidence.quote.ask if candidate.side is Side.BUY else evidence.quote.bid
         fee_estimate = None
         if evidence.fee_rate.symbol != candidate.symbol:
@@ -102,16 +117,13 @@ class RiskEngine:
                 if available < notional + fee_estimate.amount:
                     reasons.append(RiskRejectionReason.INSUFFICIENT_AVAILABLE_BALANCE)
 
-        exposure = sum(
-            (position.quantity * position.mark_price for position in evidence.account.positions if position.symbol == candidate.symbol),
-            Decimal("0"),
-        )
         metrics = (
             ("order_notional", notional),
             ("expected_quote_price", expected_quote_price),
             ("price_deviation", abs(price - expected_quote_price)),
             ("slippage", abs(evidence.quote.ask - evidence.quote.bid)),
-            ("existing_exposure", exposure),
+            ("existing_exposure", existing_exposure),
+            ("projected_exposure", projected_exposure),
         )
         unique_reasons = tuple(dict.fromkeys(reasons))
         return RiskAssessment(

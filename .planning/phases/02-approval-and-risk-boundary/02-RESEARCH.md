@@ -207,11 +207,11 @@ def propose(snapshot: SourceAnalysisSnapshot, target: ExecutionTarget) -> Candid
 
 ### Pattern 3: Hash-Bound, Single-Use Approval
 
-**What:** 票据持久化 `candidate_intent_id`、完整命令摘要、`source_snapshot_hash`、`risk_policy_hash`、`evidence_bundle_hash`、创建/过期时间和待定状态。审批时重新取证、重新评估；只有所有绑定哈希仍一致、未过期、熔断未锁存时才在同一 SQLite 事务中消费票据并取得唯一出站准入。
+**What:** 票据持久化 `candidate_intent_id`、完整命令摘要、`source_snapshot_hash`、`risk_policy_hash`、`evidence_bundle_hash`、创建/过期时间和待定状态。审批时重新取证、重新评估；只有所有绑定哈希仍一致、未过期、熔断未锁存时才在同一 SQLite 事务中消费票据、绑定命令并建立唯一不可逆的出站授权。
 
 **When to use:** 操作员批准、重试、双击和进程恢复后的所有提交尝试。
 
-**Implementation rule:** 票据 ID 是关联标识，不是可重复使用的权限；SQL 更新必须具备 `WHERE status='pending' AND expires_at_utc > ?` 和绑定哈希条件，并检查 `rowcount == 1`。成功后才调用现有 `begin_outbound_submission()`，使第二次点击得到明确 `already_consumed` 结果且没有第二个网关调用。[ASSUMED]
+**Implementation rule:** 票据 ID 是关联标识，不是可重复使用的权限；新账本原子方法必须在一个 `BEGIN IMMEDIATE` 中执行条件消费、命令绑定和 `outbound_started` 标记，并返回 `OutboundSubmission`。它不得在消费后再调用独立的 `begin_outbound_submission()` 事务。熔断若先提交，审批失败；熔断若后提交，已出站尝试必须进入取消/对账路径。第二次点击得到明确 `already_consumed` 结果且没有第二个网关调用。[ASSUMED]
 
 ### Pattern 4: Latched Kill-Switch Aggregate
 
@@ -226,7 +226,7 @@ def propose(snapshot: SourceAnalysisSnapshot, target: ExecutionTarget) -> Candid
 - **用 `has_order_opportunity()` 作为交易资格：** 它只识别中文订单类型和可选置信度，不验证完整性、来源、产品、数量或交易证据；只能保留在告警路径。[VERIFIED: codebase grep]
 - **将分析文件路径或可变 `dict` 存入票据：** 后续编辑/重新解析会改变审批实际授权内容；必须存快照和摘要。[VERIFIED: codebase grep]
 - **把旧规则/报价/账户观察当作风险检查输入：** D-05 至 D-07 明确禁止缓存替代当前证据。[VERIFIED: codebase grep]
-- **先消费票据、后写命令或在两个事务中处理：** 崩溃会留下不可解释的授权或可再次提交的命令。[ASSUMED]
+- **先消费票据、后写命令/标记出站或在两个事务中处理：** 崩溃或熔断竞态会留下不可解释的授权或可再次提交的命令。[ASSUMED]
 - **让熔断只禁用 UI 控件：** 后台重试、API 服务或恢复流程仍可能获得出站授权；硬门必须在账本/协调器内。[ASSUMED]
 - **将网关异常、签名、HTTP 请求体或凭据原样写入事件：** 审计信息必须使用受控字段和摘要。[CITED: https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html]
 
@@ -260,7 +260,7 @@ def propose(snapshot: SourceAnalysisSnapshot, target: ExecutionTarget) -> Candid
 ### Pitfall 3: 票据消费与命令准入非原子
 **What goes wrong:** 双击得到两个命令，或进程在消费后崩溃而留下未知的可提交状态。
 **Why it happens:** 用内存锁、先更新审批记录再单独调用账本。
-**How to avoid:** 在一个短 `BEGIN IMMEDIATE` 事务中验证、消费票据、持久化/绑定命令并建立出站 claim；只在事务完成后允许 `begin_outbound_submission()`。
+**How to avoid:** 在一个短 `BEGIN IMMEDIATE` 事务中验证、消费票据、持久化/绑定命令并将该命令标记为唯一的 `outbound_started`；事务完成后只使用其返回的不可逆授权调用网关。
 **Warning signs:** 票据表和命令表由不同服务分别 `commit()`，或 SQL 没有条件状态更新。[CITED: https://github.com/python/cpython/blob/v3.11.14/Doc/library/sqlite3.rst]
 
 ### Pitfall 4: 熔断恢复被“取消已请求”误判为“风险已清除”
@@ -282,7 +282,7 @@ Verified patterns from official sources and existing code:
 ### SQLite Atomic Ticket Consumption
 
 ```python
-def consume_ticket_and_claim_submission(ticket_id: str, now: datetime) -> SubmissionAdmission:
+def consume_ticket_and_begin_outbound(ticket_id: str, now: datetime) -> OutboundSubmission:
     with transaction(connection):
         ticket = load_pending_ticket(ticket_id)
         assert_ticket_is_current(ticket, now=now, kill_switch=load_kill_state())
@@ -293,10 +293,10 @@ def consume_ticket_and_claim_submission(ticket_id: str, now: datetime) -> Submis
         )
         if consumed.rowcount != 1:
             raise ApprovalRejected("ticket_not_consumable")
-        return create_or_load_and_claim_submission(ticket.command)
+        return bind_command_and_mark_outbound_started(ticket.command, ticket_id=ticket_id)
 ```
 
-该结构应复用现有显式事务辅助器；CPython 文档确认成功事务提交、异常回滚，而连接本身需要由调用者管理。[CITED: https://github.com/python/cpython/blob/v3.11.14/Doc/library/sqlite3.rst]
+该结构应复用现有显式事务辅助器，并把 Phase 1 的命令持久化/claim/outbound 标记重构为同一账本事务内可复用的私有步骤；CPython 文档确认成功事务提交、异常回滚，而连接本身需要由调用者管理。[CITED: https://github.com/python/cpython/blob/v3.11.14/Doc/library/sqlite3.rst]
 
 ### Stateful Authorization Safety Test
 
@@ -337,7 +337,7 @@ class ApprovalMachine(RuleBasedStateMachine):
 | # | Claim | Section | Risk if Wrong |
 |---|-------|---------|---------------|
 | A1 | 建议默认审批票据有效期为 60 秒，并作为固定策略值。 | Architecture Patterns | 产品可能需要不同的操作节奏；必须由用户/策略确认后锁定。 |
-| A2 | 票据消费应通过条件 `UPDATE`、rowcount 检查，并与 Phase 1 准入在同一 SQLite 事务中实现。 | Architecture Patterns | 若现有 ledger API 需要更深重构，计划必须调整迁移与接口任务。 |
+| A2 | 票据消费应通过条件 `UPDATE`、rowcount 检查，并与 Phase 1 的命令绑定及 `outbound_started` 标记在同一 SQLite 事务中实现。 | Architecture Patterns | 若现有 ledger API 需要更深重构，计划必须调整迁移与接口任务。 |
 | A3 | 启动时，对存在未决命令/暴露的账户进入需要对账的锁存或恢复状态。 | Architecture Patterns | 过严可能影响 Paper 启动体验；过松会允许未对账的风险继续执行。 |
 | A4 | 本阶段仅实施凭据引用、抽象和脱敏，而将真实 OS keychain 后端绑定到有外部适配器的阶段。 | Summary | 若 SAFE-05 被解释为此阶段必须支持真实交易凭据持久化，则需要用户指定目标 OS/后端。 |
 

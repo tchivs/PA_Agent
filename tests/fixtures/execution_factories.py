@@ -4,6 +4,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from pa_agent.trading.domain.approval import (
+    AnalysisRecommendation,
+    ExecutionTarget,
+    SourceAnalysisSnapshot,
+    digest_analysis_recommendation,
+)
 from pa_agent.trading.domain.models import (
     AccountObservation,
     Balance,
@@ -14,11 +20,6 @@ from pa_agent.trading.domain.models import (
     ProductType,
     Side,
     SpotOrderContext,
-)
-from pa_agent.trading.domain.approval import (
-    AnalysisRecommendation,
-    ExecutionTarget,
-    SourceAnalysisSnapshot,
 )
 
 
@@ -98,9 +99,12 @@ def make_source_analysis_snapshot(**overrides: object) -> SourceAnalysisSnapshot
         "completed_at": datetime(2026, 1, 1, tzinfo=UTC),
         "schema_version": "analysis-schema-v1",
         "parser_version": "parser-v1",
-        "decision_digest": "a" * 64,
         "recommendation": make_analysis_recommendation(),
         "repaired": False,
     }
     values.update(overrides)
+    if "decision_digest" not in overrides:
+        values["decision_digest"] = digest_analysis_recommendation(
+            values["recommendation"]  # type: ignore[arg-type]
+        )
     return SourceAnalysisSnapshot(**values)  # type: ignore[arg-type]

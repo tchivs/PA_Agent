@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from pa_agent.records.schema import AnalysisRecord
 from pa_agent.trading.application.intent_factory import IntentFactory
 from pa_agent.trading.domain.approval import ExecutionTarget, SourceAnalysisSnapshot
 from pa_agent.trading.domain.errors import ConversionRejection, ConversionRejectionReason
@@ -42,6 +43,7 @@ def test_completed_snapshot_produces_paper_spot_candidate_bound_to_source() -> N
         ({"schema_version": ""}, {}, ConversionRejectionReason.MISSING_SOURCE_VERSION),
         ({"parser_version": ""}, {}, ConversionRejectionReason.MISSING_SOURCE_VERSION),
         ({"decision_digest": ""}, {}, ConversionRejectionReason.MISSING_DECISION_DIGEST),
+        ({"decision_digest": "a" * 64}, {}, ConversionRejectionReason.DECISION_DIGEST_MISMATCH),
         ({}, {"side": None}, ConversionRejectionReason.MISSING_DIRECTION),
         ({}, {"price": None}, ConversionRejectionReason.MISSING_PRICE_BASIS),
         ({}, {"quantity": None}, ConversionRejectionReason.MISSING_QUANTITY_BASIS),
@@ -49,6 +51,11 @@ def test_completed_snapshot_produces_paper_spot_candidate_bound_to_source() -> N
         ({}, {"symbol": ""}, ConversionRejectionReason.MISSING_PRODUCT_CONTEXT),
         ({"repaired": True}, {}, ConversionRejectionReason.REPAIRED_SOURCE),
         ({}, {"order_type": "stop"}, ConversionRejectionReason.UNSUPPORTED_ORDER_TYPE),
+        (
+            {},
+            {"order_type": OrderType.MARKET, "price": "42000.50"},
+            ConversionRejectionReason.SEMANTIC_CONFLICT,
+        ),
     ],
 )
 def test_invalid_snapshot_fails_closed_with_stable_reason(
@@ -110,6 +117,7 @@ def test_candidate_hash_changes_for_source_decision_target_or_version() -> None:
     [
         {"source_id": "analysis-001"},
         Path("records/analysis-001.json"),
+        AnalysisRecord.model_construct(),
         object(),
     ],
 )

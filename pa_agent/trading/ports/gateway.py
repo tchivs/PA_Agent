@@ -16,7 +16,6 @@ from pa_agent.trading.domain.models import (
     RuleObservation,
     TimeObservation,
 )
-
 from pa_agent.trading.ports.ledger import OutboundSubmission
 
 

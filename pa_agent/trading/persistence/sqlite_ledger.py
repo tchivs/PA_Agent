@@ -6,9 +6,10 @@ import json
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import Any
 from uuid import uuid4
 
@@ -1177,16 +1178,21 @@ class SQLiteExecutionLedger(ExecutionLedger):
             if not self._recovery_facts_are_clear_in_transaction():
                 return False
             if not self._recovery_clearance_matches_current_scopes_in_transaction(
-                assessment_ids, zero_scope_proof
+                assessment_ids, zero_scope_proof, zero_scope_requires_challenge=False
             ):
                 return False
-            self._set_kill_switch_status_in_transaction(
+            now = self.utc_now()
+            begin_event_id = self._set_kill_switch_status_in_transaction(
                 KillSwitchStatus.RECOVERING,
                 actor_label,
-                _timestamp_text(self.utc_now()),
+                _timestamp_text(now),
                 assessment_ids,
                 zero_scope_proof,
             )
+            if zero_scope_proof is not None:
+                self._create_zero_scope_recovery_transition_in_transaction(
+                    begin_event_id, zero_scope_proof, now
+                )
             return True
 
     def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
@@ -1198,6 +1204,30 @@ class SQLiteExecutionLedger(ExecutionLedger):
             """
         ).fetchall()
         return tuple(_recovery_scope_from_row(row) for row in rows)
+
+    def get_pending_zero_scope_recovery_challenge(self) -> str | None:
+        """Return the single durable, unexpired zero-scope completion binding."""
+        connection = self._require_connection()
+        with transaction(connection):
+            if self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.RECOVERING:
+                return None
+            rows = connection.execute(
+                """
+                SELECT transition_challenge, challenge_expires_at_utc
+                FROM zero_scope_recovery_transitions
+                WHERE status = 'pending'
+                """
+            ).fetchall()
+            if len(rows) != 1:
+                return None
+            challenge, expires_at = rows[0]
+            try:
+                expires = _timestamp_from_text(str(expires_at))
+            except LedgerStorageError:
+                return None
+            if self.utc_now() >= expires:
+                return None
+            return str(challenge)
 
     def complete_kill_switch_recovery(
         self,
@@ -1214,14 +1244,19 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 or self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.RECOVERING
                 or not self._recovery_facts_are_clear_in_transaction()
                 or not self._recovery_clearance_matches_current_scopes_in_transaction(
-                    assessment_ids, zero_scope_proof
+                    assessment_ids, zero_scope_proof, zero_scope_requires_challenge=True
                 )
+            ):
+                return False
+            now = self.utc_now()
+            if zero_scope_proof is not None and not self._consume_zero_scope_recovery_transition_in_transaction(
+                zero_scope_proof, now
             ):
                 return False
             self._set_kill_switch_status_in_transaction(
                 KillSwitchStatus.READY,
                 actor_label,
-                _timestamp_text(self.utc_now()),
+                _timestamp_text(now),
                 assessment_ids,
                 zero_scope_proof,
             )
@@ -1630,6 +1665,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
         self,
         assessment_ids: tuple[str, ...],
         zero_scope_proof: ZeroScopeClearanceProof | None,
+        *,
+        zero_scope_requires_challenge: bool,
     ) -> bool:
         """Select the sole admissible clearance form from the transaction-loaded scope set."""
         active_scope_count = self._require_connection().execute(
@@ -1637,17 +1674,19 @@ class SQLiteExecutionLedger(ExecutionLedger):
         ).fetchone()[0]
         if active_scope_count == 0:
             return assessment_ids == () and self._zero_scope_proof_matches_current_state_in_transaction(
-                zero_scope_proof
+                zero_scope_proof, requires_transition_challenge=zero_scope_requires_challenge
             )
         if zero_scope_proof is not None:
             return False
         return self._recovery_assessments_match_current_scopes_in_transaction(assessment_ids)
 
     def _zero_scope_proof_matches_current_state_in_transaction(
-        self, proof: ZeroScopeClearanceProof | None
+        self, proof: ZeroScopeClearanceProof | None, *, requires_transition_challenge: bool
     ) -> bool:
         """Reject forged, stale, malformed, or non-empty ID-free proof facts."""
         if type(proof) is not ZeroScopeClearanceProof:
+            return False
+        if (proof.transition_challenge is not None) != requires_transition_challenge:
             return False
         try:
             canonical_proof = proof.to_canonical_json()
@@ -1667,6 +1706,71 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 proof.collected_at,
             )
         )
+
+    def _create_zero_scope_recovery_transition_in_transaction(
+        self, begin_event_id: str, proof: ZeroScopeClearanceProof, began_at: datetime
+    ) -> None:
+        """Create the pending recovery-only binding beside its RECOVERING event."""
+        if proof.transition_challenge is not None:
+            raise LedgerStorageError("zero-scope begin proof cannot carry a transition challenge")
+        canonical_proof = proof.to_canonical_json()
+        self._require_connection().execute(
+            """
+            INSERT INTO zero_scope_recovery_transitions(
+                transition_id, begin_event_id, begin_proof_digest, transition_challenge,
+                began_at_utc, challenge_expires_at_utc, status, consumed_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL)
+            """,
+            (
+                _new_id("zero-scope-transition"),
+                begin_event_id,
+                _digest_text(canonical_proof),
+                token_urlsafe(32),
+                _timestamp_text(began_at),
+                _timestamp_text(began_at + timedelta(seconds=60)),
+            ),
+        )
+
+    def _consume_zero_scope_recovery_transition_in_transaction(
+        self, proof: ZeroScopeClearanceProof, now: datetime
+    ) -> bool:
+        """Verify and conditionally consume one current proof before writing READY."""
+        if proof.transition_challenge is None:
+            return False
+        rows = self._require_connection().execute(
+            """
+            SELECT transition_id, begin_proof_digest, transition_challenge, began_at_utc,
+                   challenge_expires_at_utc
+            FROM zero_scope_recovery_transitions
+            WHERE status = 'pending'
+            """
+        ).fetchall()
+        if len(rows) != 1:
+            return False
+        transition_id, begin_digest, expected_challenge, began_at, expires_at = rows[0]
+        try:
+            began = _timestamp_from_text(str(began_at))
+            expires = _timestamp_from_text(str(expires_at))
+        except LedgerStorageError:
+            return False
+        canonical_proof = proof.to_canonical_json()
+        if (
+            proof.transition_challenge != expected_challenge
+            or _digest_text(canonical_proof) == begin_digest
+            or proof.collected_at <= began
+            or now >= expires
+        ):
+            return False
+        consumed = self._require_connection().execute(
+            """
+            UPDATE zero_scope_recovery_transitions
+            SET status = 'consumed', consumed_at_utc = ?
+            WHERE transition_id = ? AND status = 'pending' AND transition_challenge = ?
+              AND challenge_expires_at_utc > ?
+            """,
+            (_timestamp_text(now), transition_id, proof.transition_challenge, _timestamp_text(now)),
+        )
+        return consumed.rowcount == 1
 
     def _replace_recovery_scopes_in_transaction(self, created_at: str) -> None:
         """Snapshot the fixed target/policy set at each latch, never from a recovery caller."""
@@ -1832,7 +1936,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         occurred_at: str,
         recovery_assessment_ids: tuple[str, ...] | None = None,
         zero_scope_proof: ZeroScopeClearanceProof | None = None,
-    ) -> None:
+    ) -> str:
         """Transition the singleton and append a bounded operator audit event."""
         changed = self._require_connection().execute(
             "UPDATE kill_switch_state SET status = ?, actor_label = ?, changed_at_utc = ? WHERE singleton_id = 1",
@@ -1840,7 +1944,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         )
         if changed.rowcount != 1:
             raise LedgerStorageError("kill switch state is missing")
-        self._record_kill_switch_event(
+        return self._record_kill_switch_event(
             status, None, actor_label, occurred_at, recovery_assessment_ids, zero_scope_proof
         )
 
@@ -1852,15 +1956,16 @@ class SQLiteExecutionLedger(ExecutionLedger):
         occurred_at: str,
         recovery_assessment_ids: tuple[str, ...] | None = None,
         zero_scope_proof: ZeroScopeClearanceProof | None = None,
-    ) -> None:
+    ) -> str:
         """Append one bounded safety-state event while an immediate transaction is active."""
+        event_id = _new_id("kill-switch-event")
         self._require_connection().execute(
             """INSERT INTO kill_switch_events(
                 event_id, status, reason, actor_label, occurred_at_utc, recovery_assessment_ids_json,
                 zero_scope_clearance_proof_json, zero_scope_clearance_summary
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                _new_id("kill-switch-event"),
+                event_id,
                 status.value,
                 reason,
                 actor_label,
@@ -1870,6 +1975,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 zero_scope_proof.clearance_summary if zero_scope_proof is not None else None,
             ),
         )
+        return event_id
 
     def _append_event(
         self,

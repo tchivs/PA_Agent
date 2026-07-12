@@ -387,6 +387,36 @@ def _add_zero_scope_clearance_audit_columns(connection: sqlite3.Connection) -> N
     connection.execute("ALTER TABLE kill_switch_events ADD COLUMN zero_scope_clearance_summary TEXT")
 
 
+def _create_zero_scope_recovery_transition_schema(connection: sqlite3.Connection) -> None:
+    """Persist one expiring, one-time binding between zero-scope recovery actions."""
+    for statement in _ZERO_SCOPE_RECOVERY_TRANSITION_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+
+
+_ZERO_SCOPE_RECOVERY_TRANSITION_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE zero_scope_recovery_transitions (
+        transition_id TEXT PRIMARY KEY,
+        begin_event_id TEXT NOT NULL UNIQUE REFERENCES kill_switch_events(event_id),
+        begin_proof_digest TEXT NOT NULL,
+        transition_challenge TEXT NOT NULL UNIQUE,
+        began_at_utc TEXT NOT NULL,
+        challenge_expires_at_utc TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'consumed')),
+        consumed_at_utc TEXT,
+        CHECK(
+            (status = 'pending' AND consumed_at_utc IS NULL)
+            OR (status = 'consumed' AND consumed_at_utc IS NOT NULL)
+        )
+    )
+    """,
+    "CREATE UNIQUE INDEX zero_scope_recovery_transitions_one_pending_idx "
+    "ON zero_scope_recovery_transitions(status) WHERE status = 'pending'",
+    "CREATE INDEX zero_scope_recovery_transitions_pending_expiry_idx "
+    "ON zero_scope_recovery_transitions(status, challenge_expires_at_utc)",
+)
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
@@ -395,4 +425,5 @@ MIGRATIONS = (
     Migration(5, _create_outbound_dispatch_schema),
     Migration(6, _create_recovery_assessment_schema),
     Migration(7, _add_zero_scope_clearance_audit_columns),
+    Migration(8, _create_zero_scope_recovery_transition_schema),
 )

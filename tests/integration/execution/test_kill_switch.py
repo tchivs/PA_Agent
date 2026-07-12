@@ -499,6 +499,7 @@ def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
         ledger.close()
 
     reopened = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    clock.now = NOW + timedelta(seconds=1)
     resumed = KillSwitchService(ledger=reopened, gateway=gateway, utc_now=clock.utc_now)
     try:
         assert resumed.complete_recovery("operator-1", assessment_ids=()) is True
@@ -521,10 +522,10 @@ def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
             inspection.close()
         assert [row[0] for row in events] == ["recovering", "ready"]
         assert all(row[1] == "operator-1" and row[2] == "[]" for row in events)
-        for _, _, _, proof_json, summary in events:
+        for status, _, _, proof_json, summary in events:
             assert isinstance(summary, str) and summary
             proof = json.loads(proof_json)
-            assert set(proof) == {
+            expected_fields = {
                 "account",
                 "clearance_summary",
                 "collected_at",
@@ -534,6 +535,10 @@ def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
                 "server_time",
                 "target",
             }
+            if status == "ready":
+                expected_fields.add("transition_challenge")
+                assert isinstance(proof["transition_challenge"], str)
+            assert set(proof) == expected_fields
             assert proof["open_orders"]["count"] == 0
             assert proof["positions"] == []
             assert "recovery_assessment_id" not in proof
@@ -607,6 +612,64 @@ def test_zero_scope_persisted_transition_expiry_rejects_fresh_matching_proof(
         assert _zero_scope_transition_snapshot(execution_database_path) == baseline
         assert ledger.count_recovery_assessments() == 0
         assert _authorization_row_counts(execution_database_path) == baseline["authorization"]
+        assert gateway.submit_call_count == 0
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("challenge", [None, "forged-transition-challenge"])
+def test_zero_scope_transition_rejects_missing_or_forged_challenge_without_mutation(
+    execution_database_path: Path, challenge: str | None
+) -> None:
+    """A canonical fresh proof cannot replace the durable one-time binding."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    gateway = _CancellationGateway({})
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        assert service.begin_recovery("operator-1", assessment_ids=())
+        begin_proof = _zero_scope_proof_from_event(execution_database_path, "recovering")
+        clock.now = NOW + timedelta(seconds=1)
+        forged_proof = _fresh_zero_scope_proof(begin_proof, clock.now, challenge)
+        baseline = _zero_scope_transition_snapshot(execution_database_path)
+
+        assert not ledger.complete_kill_switch_recovery(
+            "operator-1", assessment_ids=(), zero_scope_proof=forged_proof
+        )
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
+        assert _zero_scope_transition_snapshot(execution_database_path) == baseline
+        assert ledger.count_recovery_assessments() == 0
+        assert gateway.submit_call_count == 0
+    finally:
+        ledger.close()
+
+
+def test_zero_scope_consumed_transition_cannot_write_a_second_ready_event(
+    execution_database_path: Path,
+) -> None:
+    """The conditional consumption makes even a valid proof single-use."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    gateway = _CancellationGateway({})
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        assert service.begin_recovery("operator-1", assessment_ids=())
+        begin_proof = _zero_scope_proof_from_event(execution_database_path, "recovering")
+        challenge = _pending_zero_scope_transition(execution_database_path)["transition_challenge"]
+        clock.now = NOW + timedelta(seconds=1)
+        complete_proof = _fresh_zero_scope_proof(begin_proof, clock.now, challenge)
+        assert ledger.complete_kill_switch_recovery(
+            "operator-1", assessment_ids=(), zero_scope_proof=complete_proof
+        )
+        baseline = _zero_scope_transition_snapshot(execution_database_path)
+
+        assert not ledger.complete_kill_switch_recovery(
+            "operator-1", assessment_ids=(), zero_scope_proof=complete_proof
+        )
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.READY
+        assert _zero_scope_transition_snapshot(execution_database_path) == baseline
         assert gateway.submit_call_count == 0
     finally:
         ledger.close()

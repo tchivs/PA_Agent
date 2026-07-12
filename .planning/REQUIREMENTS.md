@@ -78,7 +78,7 @@ PA Agent will provide a local, operator-controlled execution subsystem for crypt
 | SAFE-02 | Phase 2 | Pending |
 | SAFE-03 | Phase 2 | Pending |
 | SAFE-04 | Phase 2 | Pending |
-| SAFE-05 | Phase 2 | Pending |
+| SAFE-05 | Phase 2 | Complete |
 | UI-01 | Phase 4 | Pending |
 | UI-02 | Phase 4 | Pending |
 | UI-03 | Phase 4 | Pending |

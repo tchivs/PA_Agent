@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: approval-and-risk-boundary
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-07-12T10:25:45.132Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-07-12T10:33:30.628Z"
 last_activity: 2026-07-12
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 17
-  completed_plans: 9
-  percent: 0
+  completed_plans: 10
+  percent: 59
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-11)
 ## Current Position
 
 Phase: 02 (approval-and-risk-boundary) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-07-12 — Phase 02 execution started
 
-Progress: [██████████] 100%
+Progress: [██████░░░░] 59%
 
 ## Performance Metrics
 
@@ -61,6 +61,7 @@ Progress: [██████████] 100%
 | Phase 01 P07 | 5 min | 2 tasks | 6 files |
 | Phase 01 P08 | 5 min | 2 tasks | 5 files |
 | Phase 02 P01 | 6 min | 2 tasks | 8 files |
+| Phase 02 P02 | 5 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase ?]: Each SQLite migration reads its applied version inside the same immediate transaction as DDL and schema metadata insertion.
 - [Phase ?]: SQLiteExecutionLedger obtains usable connections only from guarded bootstrap, retaining fail-closed WAL, FULL, foreign-key, and busy-timeout policy.
 - [Phase 02]: Only explicit Paper Spot targets may produce candidates; target changes and frozen source provenance are included in the candidate digest, while conversion has no gateway, ledger, or submission authority.
+- [Phase 02]: Credential references are opaque metadata; withdrawal declarations fail before execution consumers receive credentials.
+- [Phase 02]: Trading settings persist only Paper Spot `phase2-v1` metadata and an optional credential reference; secret-like fields are rejected.
 
 ### Pending Todos
 
@@ -103,9 +106,10 @@ None yet.
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
 | Live rollout | Time-limited live enablement and any live-money adapter | Disabled pending separate milestone gates | 2026-07-11 |
+| Lint cleanup | Existing Ruff violations in settings and app context | Deferred outside this security plan | 2026-07-12 |
 
 ## Session Continuity
 
-Last session: 2026-07-12T10:25:45.124Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-07-12T10:33:30.628Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

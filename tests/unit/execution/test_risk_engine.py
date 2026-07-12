@@ -12,6 +12,7 @@ from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
     InstrumentRules,
+    Position,
     ProductType,
     QuoteObservation,
     TimeObservation,
@@ -104,6 +105,68 @@ def test_risk_engine_accepts_matching_complete_evidence_and_binds_digests() -> N
     assert assessment.evidence_digest
     assert assessment.fee_estimate.amount == Decimal("1.000")
     assert assessment.fee_estimate.rate_version == "fees-v1"
+
+
+def test_phase2_policy_binds_fixed_total_exposure_in_its_digest_material() -> None:
+    policy = select_phase2_policy(make_execution_target())
+
+    assert policy.maximum_total_exposure == Decimal("1000")
+    assert policy._digest_material()["maximum_total_exposure"] == Decimal("1000")
+    assert policy.policy_digest
+
+
+def test_risk_engine_accepts_projected_exposure_at_the_fixed_boundary() -> None:
+    assessment = assess()
+
+    assert assessment.accepted is True
+    assert dict(assessment.metrics)["existing_exposure"] == Decimal("0")
+    assert dict(assessment.metrics)["projected_exposure"] == Decimal("1000.000")
+
+
+def test_risk_engine_rejects_projected_exposure_above_limit_with_gross_positions() -> None:
+    one_cent_existing_position = Position(
+        symbol="BTCUSDT",
+        quantity="0.00000125",
+        entry_price="8000",
+        mark_price="8000",
+        unrealized_pnl="0",
+        margin="0",
+    )
+    opposite_signed_position = Position(
+        symbol="BTCUSDT",
+        quantity="-0.125",
+        entry_price="8000",
+        mark_price="8000",
+        unrealized_pnl="0",
+        margin="0",
+    )
+    unrelated_position = Position(
+        symbol="ETHUSDT",
+        quantity="100",
+        entry_price="1",
+        mark_price="1",
+        unrealized_pnl="0",
+        margin="0",
+    )
+
+    one_cent_over = assess(
+        account=make_account_observation(
+            positions=(one_cent_existing_position, unrelated_position),
+        )
+    )
+    opposite_signed = assess(
+        account=make_account_observation(
+            positions=(opposite_signed_position, unrelated_position),
+        )
+    )
+
+    assert one_cent_over.accepted is False
+    assert one_cent_over.reason_codes == (RiskRejectionReason.EXPOSURE_LIMIT_EXCEEDED,)
+    assert dict(one_cent_over.metrics)["existing_exposure"] == Decimal("0.01000000")
+    assert dict(one_cent_over.metrics)["projected_exposure"] == Decimal("1000.01000000")
+    assert opposite_signed.accepted is False
+    assert opposite_signed.reason_codes == (RiskRejectionReason.EXPOSURE_LIMIT_EXCEEDED,)
+    assert dict(opposite_signed.metrics)["existing_exposure"] == Decimal("1000.000")
 
 
 @pytest.mark.parametrize(

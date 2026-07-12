@@ -612,6 +612,28 @@ def test_legacy_outbound_submission_is_rejected_before_lease_or_gateway_mutation
     assert _row_counts(execution_database_path) == before
 
 
+def test_legacy_admission_and_begin_entries_are_unavailable_without_authority_side_effects(
+    execution_database_path: Path,
+) -> None:
+    """Raw commands and admissions have no public route to gateway-facing authority."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    before = _row_counts(execution_database_path)
+    try:
+        for entry_name in (
+            "create_or_load_and_claim_submission",
+            "begin_outbound_submission",
+        ):
+            with pytest.raises(AttributeError):
+                getattr(ledger, entry_name)
+    finally:
+        ledger.close()
+
+    assert gateway.outbound_submissions == []
+    assert _row_counts(execution_database_path) == before
+
+
 def test_only_persisted_current_permit_can_dispatch_once(
     execution_database_path: Path,
 ) -> None:

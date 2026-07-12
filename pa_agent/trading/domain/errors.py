@@ -38,6 +38,7 @@ class ConversionRejectionReason(StrEnum):
     INVALID_SNAPSHOT_TYPE = "invalid_snapshot_type"
     MISSING_SOURCE_ID = "missing_source_id"
     INVALID_COMPLETION_TIME = "invalid_completion_time"
+    SOURCE_ANALYSIS_STALE = "source_analysis_stale"
     MISSING_SOURCE_VERSION = "missing_source_version"
     MISSING_DECISION_DIGEST = "missing_decision_digest"
     DECISION_DIGEST_MISMATCH = "decision_digest_mismatch"

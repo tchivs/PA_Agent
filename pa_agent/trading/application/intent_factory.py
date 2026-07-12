@@ -1,7 +1,8 @@
 """Pure conversion from frozen completed analysis to a candidate execution intent."""
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 from pa_agent.trading.domain.approval import (
     AnalysisRecommendation,
@@ -16,6 +17,11 @@ from pa_agent.trading.domain.models import Mode, OrderType, ProductType, Side
 
 class IntentFactory:
     """Validate a frozen snapshot and create a non-submittable candidate proposal."""
+
+    SOURCE_ANALYSIS_MAX_AGE = timedelta(seconds=60)
+
+    def __init__(self, *, utc_now: Callable[[], datetime] | None = None) -> None:
+        self._utc_now = utc_now or (lambda: datetime.now(UTC))
 
     def propose(
         self, snapshot: SourceAnalysisSnapshot, target: ExecutionTarget
@@ -44,12 +50,16 @@ class IntentFactory:
             risk_basis=recommendation.risk_basis,
         )
 
-    @staticmethod
-    def _validate_snapshot(snapshot: SourceAnalysisSnapshot) -> None:
+    def _validate_snapshot(self, snapshot: SourceAnalysisSnapshot) -> None:
         if not snapshot.source_id:
             raise ConversionRejection(ConversionRejectionReason.MISSING_SOURCE_ID)
         if not _is_aware(snapshot.completed_at):
             raise ConversionRejection(ConversionRejectionReason.INVALID_COMPLETION_TIME)
+        now = self._utc_now()
+        if not _is_aware(now) or snapshot.completed_at > now:
+            raise ConversionRejection(ConversionRejectionReason.INVALID_COMPLETION_TIME)
+        if now - snapshot.completed_at > self.SOURCE_ANALYSIS_MAX_AGE:
+            raise ConversionRejection(ConversionRejectionReason.SOURCE_ANALYSIS_STALE)
         if not snapshot.schema_version or not snapshot.parser_version:
             raise ConversionRejection(ConversionRejectionReason.MISSING_SOURCE_VERSION)
         if not snapshot.decision_digest:

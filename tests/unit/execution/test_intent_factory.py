@@ -54,6 +54,16 @@ def test_source_snapshot_older_than_freshness_boundary_rejects_before_candidate(
     assert raised.value.reason is ConversionRejectionReason.SOURCE_ANALYSIS_STALE
 
 
+def test_future_source_completion_time_rejects_before_candidate() -> None:
+    now = datetime(2026, 7, 12, 11, 0, tzinfo=UTC)
+    snapshot = make_source_analysis_snapshot(completed_at=now + timedelta(seconds=1))
+
+    with pytest.raises(ConversionRejection) as raised:
+        IntentFactory(utc_now=lambda: now).propose(snapshot, make_execution_target())
+
+    assert raised.value.reason is ConversionRejectionReason.INVALID_COMPLETION_TIME
+
+
 @pytest.mark.parametrize(
     ("snapshot_overrides", "recommendation_overrides", "reason"),
     [

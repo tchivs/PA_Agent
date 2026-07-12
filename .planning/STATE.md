@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: approval-and-risk-boundary
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-07-12T10:43:21.593Z"
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-07-12T10:53:14.855Z"
 last_activity: 2026-07-12
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 17
-  completed_plans: 11
-  percent: 65
+  completed_plans: 12
+  percent: 71
 ---
 
 # Project State
@@ -24,34 +24,35 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-07-11)
 
 **Core value:** An operator can safely turn a validated analysis recommendation into an explicitly approved, traceable order without coupling strategy logic to a particular exchange.
-**Current focus:** Phase 02 — approval-and-risk-boundary
+**Current focus:** Phase 02 - approval-and-risk-boundary
 
 ## Current Position
 
-Phase: 02 (approval-and-risk-boundary) — EXECUTING
-Plan: 4 of 8
+Phase: 02 (approval-and-risk-boundary) - EXECUTING
+Plan: 5 of 8
 Status: Ready to execute
-Last activity: 2026-07-12 — Phase 02 execution started
+Last activity: 2026-07-12 - Phase 02 execution started
 
-Progress: [███████░░░] 65%
+Progress: [███████░░░] 71%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 4
-- Average duration: 7 min
-- Total execution time: 0.5 hours
+- Total plans completed: 12
+- Average duration: 6 min
+- Total execution time: 0.6 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01. Execution Foundation | 4 | 29 min | 7 min |
+| 02. Approval And Risk Boundary | 4 | 21 min | 5 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01 (7 min), 01-02 (4 min), 01-03 (8 min), 01-04 (10 min)
+- Last 5 plans: 02-01 (6 min), 02-02 (5 min), 02-03 (4 min), 02-04 (6 min)
 - Trend: Stable
 
 | Phase 01 P03 | 8 min | 2 tasks | 8 files |
@@ -63,6 +64,7 @@ Progress: [███████░░░] 65%
 | Phase 02 P01 | 6 min | 2 tasks | 8 files |
 | Phase 02 P02 | 5 min | 2 tasks | 8 files |
 | Phase 02 P03 | 4 min | 2 tasks | 6 files |
+| Phase 02 P04 | 6 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -79,19 +81,12 @@ Decisions are logged in `.planning/PROJECT.md`.
 - Gateway adapters remain claim-free: a future coordinator must obtain durable ledger admission before calling `submit_order`.
 - SQLite ledger initialization fails closed on storage/configuration failures and atomically admits exactly one unresolved submission claim before any gateway side effect.
 - Recovery performs only persisted client-ID evidence lookup; empty, contradictory, and out-of-order evidence cannot grant a second admission or trigger submission.
-- [Phase ?]: OrderValidationService.validate(command) is the sole public typed-command validation boundary and fetches exactly one fresh rule observation before internal Decimal checks.
-- [Phase ?]: Public execution ingress rejects raw enum/context shapes rather than normalizing untrusted inputs.
-- [Phase ?]: The ledger owns durable client-ID allocation and creates the irreversible authorization required by gateway submission.
-- [Phase ?]: SQLite allocates and persists the sole opaque client-order ID at initial admission; caller candidates are never durable remote identity.
-- [Phase ?]: Outbound authority is irreversibly transitioned to outbound_started before the abstract gateway call; later ambiguity queues reconciliation but cannot reauthorize submission.
-- [Phase ?]: SQLite bootstrap uses a process-local lock keyed by Path.resolve(strict=False) so equivalent path spellings serialize without blocking distinct databases.
-- [Phase ?]: Each SQLite migration reads its applied version inside the same immediate transaction as DDL and schema metadata insertion.
-- [Phase ?]: SQLiteExecutionLedger obtains usable connections only from guarded bootstrap, retaining fail-closed WAL, FULL, foreign-key, and busy-timeout policy.
 - [Phase 02]: Only explicit Paper Spot targets may produce candidates; target changes and frozen source provenance are included in the candidate digest, while conversion has no gateway, ledger, or submission authority.
 - [Phase 02]: Credential references are opaque metadata; withdrawal declarations fail before execution consumers receive credentials.
 - [Phase 02]: Trading settings persist only Paper Spot `phase2-v1` metadata and an optional credential reference; secret-like fields are rejected.
-- [Phase 02]: phase2-v1 binds only paper-spot-primary Paper Spot policy and rejects alternate targets. — D-08 requires exact mode, account, product, and symbol policy binding.
-- [Phase 02]: RiskEngine is pure and returns digest-bound reason-coded assessments from target-bound evidence. — Risk judgments cannot obtain gateway, ledger, GUI, notification, or submission authority.
+- [Phase 02]: phase2-v1 binds only paper-spot-primary Paper Spot policy and rejects alternate targets.
+- [Phase 02]: RiskEngine is pure and returns digest-bound reason-coded assessments from target-bound evidence.
+- [Phase 02]: FreshEvidenceCollector refreshes all target-scoped evidence in fixed order and returns only canonical reason-coded failures.
 
 ### Pending Todos
 
@@ -113,6 +108,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-12T10:43:21.587Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-07-12T10:53:14.845Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None

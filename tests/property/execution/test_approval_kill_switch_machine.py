@@ -87,7 +87,7 @@ class ApprovalKillSwitchMachine(RuleBasedStateMachine):
     @rule()
     @precondition(lambda self: self._latched)
     def caller_constructed_assessment_cannot_be_recorded(self) -> None:
-        """The ledger must reject the fabricated scope identity before allocating an ID."""
+        """Neither a fabricated value nor an active scope grants direct persistence."""
         fabricated = RecoveryAssessment(
             recovery_assessment_id=None,
             persistent_scope_id="fabricated-scope",
@@ -105,7 +105,10 @@ class ApprovalKillSwitchMachine(RuleBasedStateMachine):
             reason_codes=(),
             observed_at=datetime(2026, 7, 12, tzinfo=UTC),
         )
-        assert self._ledger.record_recovery_assessment(None, fabricated) is None
+        before = self._ledger.count_recovery_assessments()
+        assert not hasattr(self._ledger, "record_recovery_assessment")
+        assert fabricated.recovery_assessment_id is None
+        assert self._ledger.count_recovery_assessments() == before
 
     @invariant()
     def latched_state_persists_and_blocks_new_authority(self) -> None:

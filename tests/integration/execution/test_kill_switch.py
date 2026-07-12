@@ -1,27 +1,36 @@
 """Real-SQLite coverage for the durable approval kill-switch boundary."""
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 from pa_agent.trading.application.kill_switch import KillSwitchService
+from pa_agent.trading.application.recovery_assessment import RecoveryAssessmentService
 from pa_agent.trading.application.recovery import RecoveryService
 from pa_agent.trading.domain.approval import (
     KillSwitchStatus,
     RecoveryAssessment,
-    RecoveryScope,
 )
 from pa_agent.trading.domain.models import (
     AccountObservation,
     GatewayCapabilities,
     GatewayEvidence,
+    InstrumentRules,
     OrderState,
     ProductType,
+    QuoteObservation,
+    RuleObservation,
+    TimeObservation,
+)
+from pa_agent.trading.domain.risk import (
+    FeeRateObservation,
+    LossDrawdownObservation,
+    OpenOrderObservation,
+    OrderRateObservation,
+    TargetConnectionObservation,
 )
 from pa_agent.trading.persistence.sqlite_connection import (
     LedgerStorageError,
@@ -71,6 +80,30 @@ class _CancellationGateway(ReconciliationOnlyGateway):
     def list_open_orders(self, account_id: str, product: ProductType) -> tuple[object, ...]:
         del account_id, product
         return ()
+
+    def get_instrument_rules(self, symbol: str) -> RuleObservation:
+        return RuleObservation(InstrumentRules(symbol, "0.50", "0.001", "0.001", "10"), NOW)
+
+    def get_quote(self, symbol: str) -> QuoteObservation:
+        return QuoteObservation(symbol, "7999.50", "8000", NOW)
+
+    def get_server_time(self) -> TimeObservation:
+        return TimeObservation(server_time=NOW, observed_at=NOW)
+
+    def get_connection(self, target: object) -> TargetConnectionObservation:
+        return TargetConnectionObservation(target, True, NOW)
+
+    def get_open_order_count(self, target: object) -> OpenOrderObservation:
+        return OpenOrderObservation(target, 0, NOW)
+
+    def get_order_rate_window(self, target: object, window_seconds: int) -> OrderRateObservation:
+        return OrderRateObservation(target, 0, NOW - timedelta(seconds=window_seconds), NOW)
+
+    def get_loss_drawdown(self, target: object) -> LossDrawdownObservation:
+        return LossDrawdownObservation(target, "0", "0", NOW, NOW)
+
+    def get_fee_rate(self, target: object, symbol: str, quote_identifier: str) -> FeeRateObservation:
+        return FeeRateObservation(target, symbol, quote_identifier, "USDT", "0.001", "fees-v1", NOW)
 
 
 def _create_open_order(ledger: SQLiteExecutionLedger) -> str:
@@ -159,13 +192,11 @@ def test_reset_requires_processed_work_fresh_evidence_and_explicit_operator_acti
         ),
     )
     recovery.recover_startup()
-    scope = ledger.list_kill_switch_recovery_scopes()[0]
-    persisted = ledger.record_recovery_assessment(scope, _recovery_assessment_for(scope))
-    assert persisted is not None
-    assert service.begin_recovery("operator-1", assessment_ids=(persisted.recovery_assessment_id,)) is True
+    assert service.begin_recovery("operator-1") is True
     assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
     assert service.complete_recovery("operator-1", assessment_ids=("forged-assessment-id",)) is False
-    assert service.complete_recovery("operator-1", assessment_ids=(persisted.recovery_assessment_id,)) is True
+    assessment_id = _only_recovery_assessment_id(execution_database_path)
+    assert service.complete_recovery("operator-1", assessment_ids=(assessment_id,)) is True
     assert ledger.get_kill_switch_state().status is KillSwitchStatus.READY
     ledger.close()
 
@@ -201,45 +232,6 @@ def test_latch_rejects_new_ticket_consumption_and_preserves_existing_client_iden
         ledger.close()
 
 
-def _recovery_assessment_for(
-    scope: RecoveryScope,
-    *,
-    accepted: bool = True,
-    observed_at: datetime = NOW,
-    evidence_digest: str | None = None,
-) -> RecoveryAssessment:
-    """Build a caller-held clearance assertion that SQLite must independently verify."""
-    evidence_json = json.dumps(
-        {
-            "account": {},
-            "capabilities": {},
-            "connection": {},
-            "fee_rate": {},
-            "loss_drawdown": {},
-            "open_orders": {},
-            "order_rate": {},
-            "quote": {},
-            "rules": {},
-            "server_time": {},
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return RecoveryAssessment(
-        recovery_assessment_id=None,
-        persistent_scope_id=scope.persistent_scope_id,
-        scope_digest=scope.scope_digest,
-        target_digest=scope.target_digest,
-        policy_version=scope.policy_version,
-        policy_digest=scope.policy_digest,
-        evidence_digest=evidence_digest or sha256(evidence_json.encode("utf-8")).hexdigest(),
-        evidence_json=evidence_json,
-        accepted=accepted,
-        reason_codes=() if accepted else ("unresolved_exposure",),
-        observed_at=observed_at,
-    )
-
-
 def test_recovery_scope_assessment_ids_are_the_only_path_to_ready(
     execution_database_path: Path,
 ) -> None:
@@ -263,18 +255,15 @@ def test_recovery_scope_assessment_ids_are_the_only_path_to_ready(
         service.process_cancellation_work()
         RecoveryService(ledger=ledger, gateway=gateway).recover_startup()
 
-        scope = ledger.list_kill_switch_recovery_scopes()[0]
-        assessment = _recovery_assessment_for(scope)
-        persisted = ledger.record_recovery_assessment(scope, assessment)
-
-        assert persisted is not None
+        assert not hasattr(ledger, "record_recovery_assessment")
+        assert service.begin_recovery("operator-1")
         inspection = open_sqlite_connection(execution_database_path)
         try:
             assert inspection.execute("SELECT COUNT(*) FROM recovery_assessments").fetchone()[0] == 1
             assert inspection.execute("SELECT COUNT(*) FROM proposal_risk_assessments").fetchone()[0] == 0
         finally:
             inspection.close()
-        assert service.begin_recovery("operator-1", assessment_ids=(persisted.recovery_assessment_id,))
+        assessment_id = _only_recovery_assessment_id(execution_database_path)
         assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
         ledger.close()
 
@@ -283,7 +272,7 @@ def test_recovery_scope_assessment_ids_are_the_only_path_to_ready(
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
         assert not resumed.complete_recovery("operator-1", assessment_ids=("forged-assessment-id",))
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
-        assert resumed.complete_recovery("operator-1", assessment_ids=(persisted.recovery_assessment_id,))
+        assert resumed.complete_recovery("operator-1", assessment_ids=(assessment_id,))
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.READY
         assert gateway.submit_call_count == 0
         reopened.close()
@@ -291,25 +280,22 @@ def test_recovery_scope_assessment_ids_are_the_only_path_to_ready(
         ledger.close()
 
 
-@pytest.mark.parametrize(
-    ("scope_override", "assessment_override", "persists"),
-    [
-        ({"persistent_scope_id": "invented-scope"}, {}, False),
-        ({"scope_digest": "tampered-scope"}, {}, False),
-        ({"target_digest": "tampered-target"}, {}, False),
-        ({"policy_digest": "tampered-policy"}, {}, False),
-        ({}, {"evidence_digest": "tampered-evidence"}, False),
-        ({}, {"accepted": False, "reason_codes": ("unresolved_exposure",)}, True),
-        ({}, {"observed_at": NOW - timedelta(seconds=61)}, True),
-    ],
-)
-def test_forged_or_cross_boundary_recovery_assessment_never_writes_or_recovers(
+def _only_recovery_assessment_id(database_path: Path) -> str:
+    connection = open_sqlite_connection(database_path)
+    try:
+        row = connection.execute(
+            "SELECT recovery_assessment_id FROM recovery_assessments ORDER BY recorded_at_utc"
+        ).fetchone()
+        assert row is not None
+        return str(row[0])
+    finally:
+        connection.close()
+
+
+def test_caller_built_empty_assessment_has_no_persistence_path_or_authority(
     execution_database_path: Path,
-    scope_override: dict[str, object],
-    assessment_override: dict[str, object],
-    persists: bool,
 ) -> None:
-    """Caller-built scope or assessment values cannot mint authority while latched."""
+    """An active scope must not let a caller mint clearance from empty observations."""
     clock = _Clock()
     ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     try:
@@ -318,16 +304,64 @@ def test_forged_or_cross_boundary_recovery_assessment_never_writes_or_recovers(
         service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
         service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
         scope = ledger.list_kill_switch_recovery_scopes()[0]
-        supplied_scope = replace(scope, **scope_override)
-        supplied_assessment = replace(_recovery_assessment_for(supplied_scope), **assessment_override)
-
+        fabricated = RecoveryAssessment(
+            recovery_assessment_id=None,
+            persistent_scope_id=scope.persistent_scope_id,
+            scope_digest=scope.scope_digest,
+            target_digest=scope.target_digest,
+            policy_version=scope.policy_version,
+            policy_digest=scope.policy_digest,
+            evidence_digest="forged-evidence",
+            evidence_json='{"account":{},"capabilities":{},"connection":{},"fee_rate":{},"loss_drawdown":{},"open_orders":{},"order_rate":{},"quote":{},"rules":{},"server_time":{}}',
+            accepted=True,
+            reason_codes=(),
+            observed_at=NOW,
+        )
         before = ledger.count_recovery_assessments()
-        persisted = ledger.record_recovery_assessment(supplied_scope, supplied_assessment)
+        assert not hasattr(ledger, "record_recovery_assessment")
+        assert fabricated.recovery_assessment_id is None
+        assert ledger.count_recovery_assessments() == before
+        assert not service.begin_recovery("operator-1", assessment_ids=("forged-assessment-id",))
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
+        assert gateway.submit_call_count == 0
+    finally:
+        ledger.close()
 
-        assert (persisted is not None) is persists
-        assert ledger.count_recovery_assessments() == before + int(persists)
-        ids = (persisted.recovery_assessment_id,) if persisted is not None else ("forged-assessment-id",)
-        assert not service.begin_recovery("operator-1", assessment_ids=ids)
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda gateway, scope: setattr(gateway, "get_quote", lambda symbol: object()),
+        lambda gateway, scope: setattr(gateway, "get_connection", lambda target: TargetConnectionObservation(scope.target, True, NOW - timedelta(seconds=61))),
+        lambda gateway, scope: setattr(gateway, "get_fee_rate", lambda target, symbol, quote: FeeRateObservation(scope.target, symbol, quote, "USDT", "0.001", "fees-v1", NOW)),
+        lambda gateway, scope: setattr(gateway, "get_open_order_count", lambda target: (_ for _ in ()).throw(RuntimeError("unavailable"))),
+    ],
+    ids=["malformed", "stale", "cross-target", "unavailable"],
+)
+def test_invalid_controlled_observations_cannot_allocate_accepted_recovery_authority(
+    execution_database_path: Path,
+    mutation: object,
+) -> None:
+    """Malformed, stale, cross-target, and unavailable evidence fail before accepted clearance."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    try:
+        client_order_id = _create_open_order(ledger)
+        gateway = _CancellationGateway({client_order_id: None})
+        service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        scope = ledger.list_kill_switch_recovery_scopes()[0]
+        mutation(gateway, scope)
+
+        assessment = RecoveryAssessmentService(
+            ledger=ledger, gateway=gateway, utc_now=clock.utc_now
+        ).assess_and_record(scope)
+
+        assert assessment is not None
+        assert assessment.accepted is False
+        assert assessment.recovery_assessment_id is None
+        assert ledger.count_recovery_assessments() == 0
+        assert not service.begin_recovery("operator-1", assessment_ids=("forged-assessment-id",))
         assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
         assert gateway.submit_call_count == 0
     finally:

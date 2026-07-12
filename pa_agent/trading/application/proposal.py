@@ -13,10 +13,12 @@ from pa_agent.trading.application.risk_engine import RiskEngine
 from pa_agent.trading.domain.approval import (
     CandidateExecutionIntent,
     ExecutionTarget,
+    KillSwitchStatus,
     SourceAnalysisSnapshot,
 )
-from pa_agent.trading.domain.errors import ConversionRejection
+from pa_agent.trading.domain.errors import ConversionRejection, RiskRejectionReason
 from pa_agent.trading.domain.risk import RiskAssessment, RiskPolicy
+from pa_agent.trading.persistence.sqlite_connection import LedgerStorageError
 from pa_agent.trading.ports.ledger import ExecutionLedger
 
 
@@ -59,6 +61,8 @@ class ProposalService:
         """Collect fresh evidence once, then persist the complete risk outcome."""
         if candidate is None:
             raise ValueError("a rejected conversion cannot be assessed")
+        if self._ledger.get_kill_switch_state().status is not KillSwitchStatus.READY:
+            return self._record_kill_switch_rejection(candidate, policy)
         try:
             evidence = self._evidence_collector.collect(candidate, target, policy)
         except EvidenceCollectionRejection as error:
@@ -77,7 +81,34 @@ class ProposalService:
             return assessment
         self._ledger.record_evidence(candidate, evidence)
         assessment = self._risk_engine.assess(candidate, target, policy, evidence)
-        self._ledger.record_risk_assessment(candidate, assessment)
+        try:
+            self._ledger.record_risk_assessment(candidate, assessment)
+        except LedgerStorageError:
+            if (
+                assessment.accepted
+                and self._ledger.get_kill_switch_state().status is not KillSwitchStatus.READY
+            ):
+                return self._record_kill_switch_rejection(candidate, policy)
+            raise
         if assessment.accepted and self._approval_service is not None:
             self._approval_service.create_pending_ticket(candidate, assessment)
+        return assessment
+
+    def _record_kill_switch_rejection(
+        self, candidate: CandidateExecutionIntent, policy: RiskPolicy
+    ) -> RiskAssessment:
+        """Persist a stable, evidence-free rejection while durable authority is unavailable."""
+        reason = RiskRejectionReason.KILL_SWITCH_NOT_READY
+        assessment = RiskAssessment(
+            accepted=False,
+            reason_codes=(reason,),
+            metrics=(),
+            policy_version=policy.policy_version,
+            policy_digest=policy.policy_digest,
+            evidence_digest=sha256(
+                f"{candidate.intent_digest}:{policy.policy_digest}:{reason.value}".encode()
+            ).hexdigest(),
+            fee_estimate=None,
+        )
+        self._ledger.record_risk_assessment(candidate, assessment)
         return assessment

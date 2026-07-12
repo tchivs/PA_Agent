@@ -98,6 +98,7 @@ class RiskRejectionReason(StrEnum):
     EVIDENCE_CONNECTION_DEGRADED = "evidence_connection_degraded"
     EVIDENCE_CAPABILITY_MISMATCH = "evidence_capability_mismatch"
     INVALID_ECONOMIC_INPUT = "invalid_economic_input"
+    KILL_SWITCH_NOT_READY = "kill_switch_not_ready"
 
 
 class RiskRejection(TradingDomainError, ValueError):

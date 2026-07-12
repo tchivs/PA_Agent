@@ -29,7 +29,10 @@ from pa_agent.trading.domain.risk import (
     TargetConnectionObservation,
     select_phase2_policy,
 )
-from pa_agent.trading.persistence.sqlite_connection import LedgerStorageError, open_sqlite_connection
+from pa_agent.trading.persistence.sqlite_connection import (
+    LedgerStorageError,
+    open_sqlite_connection,
+)
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
 from tests.fixtures.execution_factories import (
     make_account_observation,
@@ -47,6 +50,23 @@ NOW = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
 class _Clock:
     def utc_now(self) -> datetime:
         return NOW
+
+
+class _LatchingRiskEngine(RiskEngine):
+    """Latch after the service precheck to exercise the accepted-write race."""
+
+    def __init__(self, ledger: SQLiteExecutionLedger) -> None:
+        self._ledger = ledger
+
+    def assess(self, candidate, target, policy, evidence):
+        self._ledger.latch_kill_switch(
+            reason="race-stop",
+            actor_label="operator-1",
+            policy_summary="paper-spot-primary",
+            evidence_summary="race before accepted persistence",
+            cancellation_supported=False,
+        )
+        return super().assess(candidate, target, policy, evidence)
 
 
 def _gateway() -> ScriptedEvidenceGateway:
@@ -73,12 +93,16 @@ def _gateway() -> ScriptedEvidenceGateway:
     )
 
 
-def _service(ledger: SQLiteExecutionLedger, gateway: ScriptedEvidenceGateway) -> ProposalService:
+def _service(
+    ledger: SQLiteExecutionLedger,
+    gateway: ScriptedEvidenceGateway,
+    risk_engine: RiskEngine | None = None,
+) -> ProposalService:
     return ProposalService(
         ledger=ledger,
         intent_factory=IntentFactory(utc_now=lambda: NOW),
         evidence_collector=FreshEvidenceCollector(gateway=gateway, utc_now=lambda: NOW),
-        risk_engine=RiskEngine(),
+        risk_engine=risk_engine or RiskEngine(),
         approval_service=ApprovalService(ledger=ledger, utc_now=lambda: NOW),
     )
 
@@ -189,4 +213,23 @@ def test_latched_ledger_rejects_direct_accepted_assessment_write(execution_datab
         )
     ledger.close()
 
+    _assert_no_accepted_risk_or_authority(execution_database_path)
+
+
+def test_latch_between_service_precheck_and_accepted_write_becomes_rejection(
+    execution_database_path,
+) -> None:
+    """The SQLite READY gate closes the narrow race after fresh evidence collection."""
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=_Clock())
+    gateway = _gateway()
+    service = _service(ledger, gateway, _LatchingRiskEngine(ledger))
+    candidate, target = _candidate(service)
+
+    assessment = service.assess(candidate, target, select_phase2_policy(target))
+    facts = ledger.list_proposal_audit_facts()
+    ledger.close()
+
+    assert assessment.accepted is False
+    assert facts[-1].kind == "risk_rejected"
+    assert facts[-1].reason_code == "kill_switch_not_ready"
     _assert_no_accepted_risk_or_authority(execution_database_path)

@@ -828,6 +828,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
             raise TypeError("risk audit requires canonical candidate and assessment values")
         connection = self._require_connection()
         with transaction(connection):
+            if assessment.accepted:
+                self._require_ready_in_transaction()
             snapshot_digest = self._candidate_snapshot_digest(candidate)
             now = _timestamp_text(self.utc_now())
             fee_amount = (

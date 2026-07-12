@@ -17,6 +17,7 @@ from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
     InstrumentRules,
+    Position,
     ProductType,
     QuoteObservation,
     RuleObservation,
@@ -45,7 +46,9 @@ pytestmark = pytest.mark.integration
 NOW = datetime(2026, 7, 12, 11, 0, tzinfo=UTC)
 
 
-def _gateway(*, accepted: bool = True) -> ScriptedEvidenceGateway:
+def _gateway(
+    *, accepted: bool = True, positions: tuple[Position, ...] = ()
+) -> ScriptedEvidenceGateway:
     target = make_execution_target()
     return ScriptedEvidenceGateway(
         capabilities=[GatewayCapabilities(frozenset({ProductType.SPOT}), True)],
@@ -54,7 +57,7 @@ def _gateway(*, accepted: bool = True) -> ScriptedEvidenceGateway:
             make_account_observation(
                 observed_at=NOW,
                 balances=(Balance("USDT", "2000", "1500" if accepted else "1", "0"),),
-                positions=(),
+                positions=positions,
             )
         ],
         quotes=[QuoteObservation("BTCUSDT", "7999.50", "8000", NOW)],
@@ -160,6 +163,45 @@ def test_rejected_assessment_creates_no_ticket(execution_database_path, accepted
     assert candidate is not None
     assert assessment.accepted is False
     assert tickets == ()
+
+
+def test_over_limit_exposure_persists_rejection_without_ticket_or_outbound_side_effects(
+    execution_database_path,
+) -> None:
+    """Selected-account gross exposure rejects the automatic ticket boundary."""
+    ledger = SQLiteExecutionLedger(execution_database_path)
+    gateway = _gateway(
+        positions=(
+            Position(
+                symbol="BTCUSDT",
+                quantity="0.001",
+                entry_price="8000",
+                mark_price="8000",
+                unrealized_pnl="0",
+                margin="0",
+            ),
+        )
+    )
+    candidate, assessment = _propose_and_assess(_service(ledger, gateway))
+    audit_facts = ledger.list_proposal_audit_facts()
+    tickets = ledger.list_approval_tickets()
+    ledger.close()
+
+    assert candidate is not None
+    assert assessment.accepted is False
+    assert [reason.value for reason in assessment.reason_codes] == ["exposure_limit_exceeded"]
+    assert audit_facts[-1].kind == "risk_rejected"
+    assert audit_facts[-1].reason_code == "exposure_limit_exceeded"
+    assert tickets == ()
+    assert gateway.submit_call_count == 0
+
+    inspection = open_sqlite_connection(execution_database_path)
+    try:
+        assert inspection.execute("SELECT COUNT(*) FROM approval_tickets").fetchone()[0] == 0
+        assert inspection.execute("SELECT COUNT(*) FROM order_commands").fetchone()[0] == 0
+        assert inspection.execute("SELECT COUNT(*) FROM submission_claims").fetchone()[0] == 0
+    finally:
+        inspection.close()
 
 
 @pytest.mark.parametrize(

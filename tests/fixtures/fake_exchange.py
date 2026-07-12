@@ -1,10 +1,12 @@
-"""Deterministic reconciliation-only gateway for execution recovery tests."""
+"""Deterministic offline gateways for execution-boundary tests."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from threading import Event
 
 from pa_agent.trading.domain.models import GatewayEvidence, RuleObservation
 from pa_agent.trading.ports.gateway import GatewayUnavailableError
+from pa_agent.trading.ports.ledger import OutboundSubmission
 
 
 class ReconciliationOnlyGateway:
@@ -52,3 +54,104 @@ class ScriptedInstrumentRuleGateway:
         """Reject every submission because validation may only obtain rule metadata."""
         self.submit_call_count += 1
         raise AssertionError("validation must never submit an order")
+
+
+class ScriptedEvidenceGateway:
+    """Consume a complete scripted evidence sequence and reject submissions."""
+
+    def __init__(
+        self,
+        *,
+        capabilities: Sequence[object],
+        rules: Sequence[object],
+        accounts: Sequence[object],
+        quotes: Sequence[object],
+        server_times: Sequence[object],
+        connections: Sequence[object],
+        open_orders: Sequence[object],
+        order_rates: Sequence[object],
+        loss_drawdowns: Sequence[object],
+        fee_rates: Sequence[object],
+    ) -> None:
+        self._responses = {
+            "capabilities": list(capabilities),
+            "rules": list(rules),
+            "account": list(accounts),
+            "quote": list(quotes),
+            "server_time": list(server_times),
+            "connection": list(connections),
+            "open_orders": list(open_orders),
+            "order_rate": list(order_rates),
+            "loss_drawdown": list(loss_drawdowns),
+            "fee_rate": list(fee_rates),
+        }
+        self.call_order: list[str] = []
+        self.submit_call_count = 0
+
+    def _next(self, name: str) -> object:
+        self.call_order.append(name)
+        responses = self._responses[name]
+        if not responses:
+            raise AssertionError(f"unexpected {name} lookup")
+        response = responses.pop(0)
+        if isinstance(response, GatewayUnavailableError):
+            raise response
+        return response
+
+    def get_capabilities(self) -> object:
+        return self._next("capabilities")
+
+    def get_instrument_rules(self, symbol: str) -> object:
+        del symbol
+        return self._next("rules")
+
+    def get_account_snapshot(self, account_id: str, product: object) -> object:
+        del account_id, product
+        return self._next("account")
+
+    def get_quote(self, symbol: str) -> object:
+        del symbol
+        return self._next("quote")
+
+    def get_server_time(self) -> object:
+        return self._next("server_time")
+
+    def get_connection(self, target: object) -> object:
+        del target
+        return self._next("connection")
+
+    def get_open_order_count(self, target: object) -> object:
+        del target
+        return self._next("open_orders")
+
+    def get_order_rate_window(self, target: object, window_seconds: int) -> object:
+        del target, window_seconds
+        return self._next("order_rate")
+
+    def get_loss_drawdown(self, target: object) -> object:
+        del target
+        return self._next("loss_drawdown")
+
+    def get_fee_rate(self, target: object, symbol: str, quote_identifier: str) -> object:
+        del target, symbol, quote_identifier
+        return self._next("fee_rate")
+
+    def submit_order(self, *args: object, **kwargs: object) -> GatewayEvidence:
+        self.submit_call_count += 1
+        raise AssertionError("evidence collection must never submit an order")
+
+
+class BlockingSubmissionGateway:
+    """In-memory coordinator fake that blocks after protected authorization."""
+
+    def __init__(self) -> None:
+        self.submit_started = Event()
+        self.release_submit = Event()
+        self.outbound_submissions: list[OutboundSubmission] = []
+
+    def submit_order(self, outbound: OutboundSubmission) -> None:
+        """Record one authorization and wait for the deterministic race interleaving."""
+        self.outbound_submissions.append(outbound)
+        self.submit_started.set()
+        if not self.release_submit.wait(timeout=1):
+            raise AssertionError("test did not release the blocking gateway")

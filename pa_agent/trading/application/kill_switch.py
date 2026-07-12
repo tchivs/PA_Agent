@@ -112,7 +112,15 @@ class KillSwitchService:
         if not scopes:
             if assessment_ids not in (None, ()):
                 return False
-            proof = self._zero_scope_clearance_collector.collect()
+            try:
+                transition_challenge = self._ledger.get_pending_zero_scope_recovery_challenge()
+            except Exception:
+                return False
+            if transition_challenge is None:
+                return False
+            proof = self._zero_scope_clearance_collector.collect(
+                transition_challenge=transition_challenge
+            )
             if proof is None:
                 return False
             try:

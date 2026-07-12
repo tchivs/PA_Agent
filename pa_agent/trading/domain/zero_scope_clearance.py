@@ -37,6 +37,7 @@ class ZeroScopeClearanceProof:
     server_time: TimeObservation
     collected_at: datetime
     clearance_summary: str = _SUMMARY
+    transition_challenge: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -61,6 +62,12 @@ class ZeroScopeClearanceProof:
             raise ValueError("zero-scope proof contains residual target exposure")
         if self.collected_at.tzinfo is None or self.collected_at.utcoffset() is None:
             raise ValueError("zero-scope proof collection time must be timezone-aware")
+        if self.transition_challenge is not None and (
+            type(self.transition_challenge) is not str
+            or not self.transition_challenge
+            or self.transition_challenge != self.transition_challenge.strip()
+        ):
+            raise ValueError("zero-scope transition challenge must be opaque nonempty text")
 
     def to_canonical_json(self) -> str:
         """Serialize the proof deterministically for audit and transaction revalidation."""
@@ -68,7 +75,7 @@ class ZeroScopeClearanceProof:
 
     def canonical_payload(self) -> dict[str, object]:
         """Return the controlled, ID-free durable payload."""
-        return {
+        payload: dict[str, object] = {
             "account": canonicalize(self.account),
             "clearance_summary": self.clearance_summary,
             "collected_at": self.collected_at.astimezone(UTC).isoformat(),
@@ -78,13 +85,16 @@ class ZeroScopeClearanceProof:
             "server_time": canonicalize(self.server_time),
             "target": canonicalize(self.target),
         }
+        if self.transition_challenge is not None:
+            payload["transition_challenge"] = self.transition_challenge
+        return payload
 
     @classmethod
     def from_canonical_json(cls, value: str) -> ZeroScopeClearanceProof:
         """Parse only an exact canonical proof representation."""
         try:
             payload = json.loads(value)
-            if set(payload) != {
+            required_fields = {
                 "account",
                 "clearance_summary",
                 "collected_at",
@@ -93,6 +103,10 @@ class ZeroScopeClearanceProof:
                 "positions",
                 "server_time",
                 "target",
+            }
+            payload_fields = set(payload)
+            if payload_fields != required_fields and payload_fields != required_fields | {
+                "transition_challenge"
             }:
                 raise ValueError("zero-scope proof fields are incomplete")
             target_raw = payload["target"]
@@ -132,6 +146,7 @@ class ZeroScopeClearanceProof:
                 ),
                 collected_at=_parse_timestamp(payload["collected_at"]),
                 clearance_summary=payload["clearance_summary"],
+                transition_challenge=payload.get("transition_challenge"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("zero-scope proof is not canonical") from exc

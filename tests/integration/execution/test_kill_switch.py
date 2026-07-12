@@ -568,6 +568,7 @@ def test_zero_scope_begin_proof_cannot_complete_recovery_after_reopen(
         assert _authorization_row_counts(execution_database_path) == baseline["authorization"]
         assert gateway.submit_call_count == 0
 
+        clock.now = NOW + timedelta(seconds=1)
         resumed = KillSwitchService(ledger=reopened, gateway=gateway, utc_now=clock.utc_now)
         assert resumed.complete_recovery("operator-1", assessment_ids=())
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.READY

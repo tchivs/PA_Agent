@@ -240,6 +240,14 @@ class ExecutionLedger(Protocol):
     def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
         """Return each persisted account/product scope needing fresh gateway evidence."""
 
+    def get_pending_zero_scope_recovery_challenge(self) -> str | None:
+        """Return one opaque pending zero-scope transition binding while RECOVERING.
+
+        The value is a recovery-only reconciliation binding. It is not an
+        assessment ID, ticket, command, claim, permit, outbound value, or
+        gateway capability.
+        """
+
     def complete_kill_switch_recovery(
         self,
         actor_label: str,

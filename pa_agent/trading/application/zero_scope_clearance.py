@@ -19,7 +19,7 @@ class ZeroScopeClearanceCollector:
         self._gateway = gateway
         self._utc_now = utc_now
 
-    def collect(self) -> ZeroScopeClearanceProof | None:
+    def collect(self, *, transition_challenge: str | None = None) -> ZeroScopeClearanceProof | None:
         """Return current empty-scope facts, or fail closed without allocating authority."""
         now = self._utc_now()
         if not _is_aware(now):
@@ -41,6 +41,7 @@ class ZeroScopeClearanceCollector:
                 connection=connection,
                 server_time=server_time,
                 collected_at=now.astimezone(UTC),
+                transition_challenge=transition_challenge,
             )
         except Exception:
             return None

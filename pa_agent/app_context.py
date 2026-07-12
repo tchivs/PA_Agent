@@ -26,6 +26,9 @@ class AppContext:
     exp_reader: Any = None        # ExperienceReader
     ledger: Any = None            # SessionTokenLedger
 
+    # Trading security boundary: reference metadata only, never resolved credentials.
+    trading_credential_reference: Any = None
+
     @classmethod
     def bootstrap(cls) -> "AppContext":
         """Wire all real components and return a fully initialised AppContext."""
@@ -140,4 +143,5 @@ class AppContext:
             pending_writer=pending_writer,
             exp_reader=exp_reader,
             ledger=ledger,
+            trading_credential_reference=settings.trading.credential_reference,
         )

@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from pa_agent.trading.security.credentials import CredentialReference
+
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
 DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney", "tushare"]
 NormalizationMode = Literal["strict", "lenient"]
@@ -154,6 +156,16 @@ class PushPlusSettings(BaseModel):
     token: str = ""
 
 
+class TradingSettings(BaseModel):
+    """Persisted Phase 2 execution selection without credential material."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: Literal["paper-spot"] = "paper-spot"
+    policy_version: Literal["phase2-v1"] = "phase2-v1"
+    credential_reference: CredentialReference | None = None
+
+
 class Settings(BaseModel):
     """Root settings object persisted to config/settings.json."""
     model_config = ConfigDict(extra="ignore")
@@ -165,6 +177,7 @@ class Settings(BaseModel):
     feishu: FeishuSettings = Field(default_factory=FeishuSettings)
     pushplus: PushPlusSettings = Field(default_factory=PushPlusSettings)
     tushare: TushareSettings = Field(default_factory=TushareSettings)
+    trading: TradingSettings = Field(default_factory=TradingSettings)
 
 
 def provider_api_key_configured(settings: Settings | None) -> bool:
@@ -275,6 +288,6 @@ def save_settings(settings: "Settings", path: Path | None = None) -> None:
     path = path or SETTINGS_JSON_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    data = settings.model_dump()
+    data = settings.model_dump(mode="json")
 
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

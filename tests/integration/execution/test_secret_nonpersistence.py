@@ -11,7 +11,6 @@ from pa_agent.config.settings import Settings, TradingSettings, load_settings, s
 from pa_agent.trading.security.credentials import CredentialReference
 from pa_agent.trading.security.redaction import REDACTION_TOKEN, SecretRedactor
 
-
 API_KEY = "synthetic-api-key-9f5c"
 API_SECRET = "synthetic-api-secret-31bc"
 PASSPHRASE = "synthetic-passphrase-7da2"

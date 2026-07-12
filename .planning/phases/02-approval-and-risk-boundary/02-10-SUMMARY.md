@@ -119,7 +119,20 @@ Passed:
 
 ## Deviations from Plan
 
-None - plan executed exactly as written.
+### Auto-fixed Issues
+
+**1. [Rule 1 - Tooling Bug] Repaired malformed state decision entry**
+- **Found during:** Plan metadata update
+- **Issue:** The installed GSD state handler treated the summary file path as literal decision text and inserted the full summary into `STATE.md`.
+- **Fix:** Removed the malformed entry and retained the two concise exposure-policy decisions.
+- **Files modified:** `.planning/STATE.md`
+- **Verification:** `STATE.md` remains under 150 lines and includes only normal decision entries.
+- **Committed in:** Not committed to preserve pre-existing unrelated `STATE.md` changes.
+
+---
+
+**Total deviations:** 1 auto-fixed (1 Rule 1 tooling bug).
+**Impact on plan:** No production behavior changed; the state record remains readable without staging unrelated worktree changes.
 
 ## Issues Encountered
 

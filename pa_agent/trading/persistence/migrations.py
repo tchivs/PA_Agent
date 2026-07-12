@@ -33,13 +33,13 @@ def run_migrations(
             """
         )
 
-    applied = {
-        row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")
-    }
     for migration in selected_migrations:
-        if migration.version in applied:
-            continue
         with transaction(connection):
+            applied = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = ?", (migration.version,)
+            ).fetchone()
+            if applied is not None:
+                continue
             migration.apply(connection)
             connection.execute(
                 "INSERT INTO schema_migrations(version, applied_at_utc) VALUES (?, ?)",
@@ -156,4 +156,82 @@ def _utc_now_text() -> str:
     return datetime.now(UTC).isoformat()
 
 
-MIGRATIONS = (Migration(1, _create_initial_schema),)
+def _create_proposal_audit_schema(connection: sqlite3.Connection) -> None:
+    """Create append-only pre-ticket proposal, evidence, and assessment storage."""
+    for statement in _PROPOSAL_AUDIT_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+
+
+_PROPOSAL_AUDIT_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE proposal_sources (
+        snapshot_digest TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        completed_at_utc TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        parser_version TEXT NOT NULL,
+        decision_digest TEXT NOT NULL,
+        target_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE proposal_candidates (
+        intent_digest TEXT PRIMARY KEY,
+        snapshot_digest TEXT NOT NULL REFERENCES proposal_sources(snapshot_digest),
+        candidate_json TEXT NOT NULL,
+        recorded_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE proposal_evidence (
+        evidence_digest TEXT PRIMARY KEY,
+        intent_digest TEXT NOT NULL REFERENCES proposal_candidates(intent_digest),
+        evidence_json TEXT NOT NULL,
+        observed_at_utc TEXT NOT NULL,
+        recorded_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE proposal_risk_assessments (
+        assessment_id TEXT PRIMARY KEY,
+        intent_digest TEXT NOT NULL REFERENCES proposal_candidates(intent_digest),
+        accepted INTEGER NOT NULL,
+        policy_version TEXT NOT NULL,
+        policy_digest TEXT NOT NULL,
+        evidence_digest TEXT NOT NULL,
+        reason_codes_json TEXT NOT NULL,
+        fee_amount TEXT,
+        assessment_json TEXT NOT NULL,
+        observed_at_utc TEXT NOT NULL,
+        recorded_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE proposal_audit_facts (
+        fact_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        source_digest TEXT NOT NULL,
+        source_snapshot_digest TEXT NOT NULL REFERENCES proposal_sources(snapshot_digest),
+        intent_digest TEXT REFERENCES proposal_candidates(intent_digest),
+        policy_digest TEXT,
+        evidence_digest TEXT,
+        reason_code TEXT,
+        fee_amount TEXT,
+        observed_at_utc TEXT NOT NULL,
+        recorded_at_utc TEXT NOT NULL,
+        summary_json TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX proposal_candidates_snapshot_idx ON proposal_candidates(snapshot_digest)",
+    "CREATE INDEX proposal_evidence_intent_idx ON proposal_evidence(intent_digest)",
+    "CREATE INDEX proposal_risk_assessments_intent_idx ON proposal_risk_assessments(intent_digest)",
+    "CREATE INDEX proposal_audit_facts_source_idx ON proposal_audit_facts(source_id, recorded_at_utc)",
+    "CREATE INDEX proposal_audit_facts_intent_idx ON proposal_audit_facts(intent_digest, recorded_at_utc)",
+)
+
+
+MIGRATIONS = (
+    Migration(1, _create_initial_schema),
+    Migration(2, _create_proposal_audit_schema),
+)

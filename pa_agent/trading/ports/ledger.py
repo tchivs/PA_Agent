@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from pa_agent.trading.domain.approval import (
+    CandidateExecutionIntent,
+    ExecutionTarget,
+    SourceAnalysisSnapshot,
+)
+from pa_agent.trading.domain.errors import ConversionRejectionReason
 from pa_agent.trading.domain.models import (
     AccountObservation,
     ExecutionCommand,
@@ -11,6 +18,7 @@ from pa_agent.trading.domain.models import (
     LifecycleEvent,
     OrderState,
 )
+from pa_agent.trading.domain.risk import EvidenceBundle, RiskAssessment
 
 _NONTERMINAL_SUBMISSION_STATES = frozenset(
     {
@@ -108,6 +116,22 @@ class ReconciliationResult:
     evidence_applied: bool
 
 
+@dataclass(frozen=True)
+class ProposalAuditFact:
+    """Controlled, queryable pre-ticket audit fact without execution authority."""
+
+    kind: str
+    source_id: str
+    source_digest: str
+    policy_digest: str | None
+    evidence_digest: str | None
+    reason_code: str | None
+    fee_amount: str | None
+    observed_at: datetime
+    recorded_at: datetime
+    summary_json: str
+
+
 @runtime_checkable
 class ExecutionLedger(Protocol):
     """Repository port that makes durable submission admission an atomic boundary."""
@@ -138,6 +162,28 @@ class ExecutionLedger(Protocol):
 
     def record_account_observation(self, observation: AccountObservation) -> str:
         """Persist one explicit typed canonical account observation and return its ID."""
+
+    def record_conversion_rejection(
+        self,
+        snapshot: SourceAnalysisSnapshot,
+        target: ExecutionTarget,
+        reason: ConversionRejectionReason,
+    ) -> None:
+        """Persist one controlled D-02 conversion rejection without a command or ticket."""
+
+    def record_candidate(self, candidate: CandidateExecutionIntent) -> None:
+        """Persist an accepted candidate before fresh evidence or ticket creation."""
+
+    def record_evidence(self, candidate: CandidateExecutionIntent, evidence: EvidenceBundle) -> None:
+        """Persist one complete immutable evidence bundle for an accepted candidate."""
+
+    def record_risk_assessment(
+        self, candidate: CandidateExecutionIntent, assessment: RiskAssessment
+    ) -> None:
+        """Persist an allowlisted risk result; this cannot issue or consume a ticket."""
+
+    def list_proposal_audit_facts(self) -> tuple[ProposalAuditFact, ...]:
+        """Return pre-ticket controlled audit facts in their durable recorded order."""
 
 
     def mark_submission_ambiguous(

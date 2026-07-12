@@ -10,26 +10,45 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pa_agent.trading.domain.errors import LifecycleTransitionError, ReconciliationEvidenceError
+from pa_agent.trading.domain.approval import (
+    CandidateExecutionIntent,
+    ExecutionTarget,
+    SourceAnalysisSnapshot,
+)
+from pa_agent.trading.domain.errors import (
+    ConversionRejectionReason,
+    LifecycleTransitionError,
+    ReconciliationEvidenceError,
+)
 from pa_agent.trading.domain.lifecycle import assert_transition
 from pa_agent.trading.domain.models import (
+    AccountObservation,
     ExecutionCommand,
     Fill,
     GatewayEvidence,
+    IsolatedMarginOrderContext,
     LifecycleEvent,
+    Mode,
     OrderState,
+    OrderType,
+    ProductType,
+    Side,
+    SpotOrderContext,
+    UsdtPerpetualOrderContext,
     canonicalize,
     decimal_to_canonical,
 )
-from pa_agent.trading.persistence.migrations import run_migrations
+from pa_agent.trading.domain.risk import EvidenceBundle, RiskAssessment
 from pa_agent.trading.persistence.sqlite_connection import (
     LedgerStorageError,
-    open_sqlite_connection,
+    bootstrap_sqlite_connection,
     transaction,
 )
 from pa_agent.trading.ports.clock import UtcClock
 from pa_agent.trading.ports.ledger import (
     ExecutionLedger,
+    OutboundSubmission,
+    ProposalAuditFact,
     ReconciliationJob,
     ReconciliationResult,
     SubmissionAdmission,
@@ -51,14 +70,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
         clock: UtcClock | None = None,
         failure_injector: Callable[[str], None] | None = None,
     ) -> None:
-        self._connection: sqlite3.Connection | None = open_sqlite_connection(database_path)
+        self._connection: sqlite3.Connection | None = bootstrap_sqlite_connection(database_path)
         self._clock = clock
         self._failure_injector = failure_injector
-        try:
-            run_migrations(self._connection)
-        except Exception:
-            self._connection.close()
-            raise
 
     def close(self) -> None:
         """Close the thread-confined SQLite connection deterministically."""
@@ -80,7 +94,21 @@ class SQLiteExecutionLedger(ExecutionLedger):
             if existing is not None:
                 return existing
 
-            command_json = _canonical_json(command.to_canonical_dict())
+            client_order_id = _new_id("client-order")
+            durable_command = ExecutionCommand(
+                command_id=command.command_id,
+                logical_command_key=command.logical_command_key,
+                client_order_id=client_order_id,
+                mode=command.mode,
+                account_id=command.account_id,
+                symbol=command.symbol,
+                side=command.side,
+                order_type=command.order_type,
+                quantity=command.quantity,
+                context=command.context,
+                price=command.price,
+            )
+            command_json = _canonical_json(durable_command.to_canonical_dict())
             now = _timestamp_text(self.utc_now())
             submitting = assert_transition(OrderState.PROPOSED, LifecycleEvent.SUBMIT_REQUESTED)
             job_id = _new_id("reconciliation")
@@ -95,14 +123,14 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    command.command_id,
-                    command.logical_command_key,
-                    command.client_order_id,
+                    durable_command.command_id,
+                    durable_command.logical_command_key,
+                    client_order_id,
                     command_json,
-                    command.mode.value,
-                    command.context.product.value,
-                    command.account_id,
-                    command.symbol,
+                    durable_command.mode.value,
+                    durable_command.context.product.value,
+                    durable_command.account_id,
+                    durable_command.symbol,
                     now,
                 ),
             )
@@ -140,33 +168,59 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 (claim_id, command.command_id, claim_token, now, "admitted"),
             )
             return SubmissionAdmission(
-                command_id=command.command_id,
-                client_order_id=command.client_order_id,
+                command_id=durable_command.command_id,
+                client_order_id=client_order_id,
                 reconciliation_job_id=job_id,
                 lifecycle_state=submitting,
                 is_admissible=True,
                 claim_token=claim_token,
             )
-    def assert_submission_claim_is_live(self, admission: SubmissionAdmission) -> None:
-        """Fail closed when a durable admission claim is absent, stale, or consumed."""
+    def begin_outbound_submission(self, admission: SubmissionAdmission) -> OutboundSubmission:
+        """Atomically consume an admitted claim into one irreversible authorization."""
         if not admission.is_admissible or admission.claim_token is None:
-            raise LedgerStorageError("submission admission has no active claim")
-        row = self._require_connection().execute(
-            """
-            SELECT orders.lifecycle_state, claims.claim_token, claims.status
-            FROM orders
-            JOIN submission_claims AS claims ON claims.command_id = orders.command_id
-            WHERE orders.command_id = ?
-            """,
-            (admission.command_id,),
-        ).fetchone()
-        if (
-            row is None
-            or row[0] != OrderState.SUBMITTING.value
-            or row[1] != admission.claim_token
-            or row[2] != "admitted"
-        ):
-            raise LedgerStorageError("submission claim is no longer live")
+            raise LedgerStorageError("cannot begin outbound submission without an admitted claim")
+        connection = self._require_connection()
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT commands.command_json, commands.client_order_id, jobs.job_id,
+                       orders.lifecycle_state, claims.claim_token, claims.status
+                FROM order_commands AS commands
+                JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
+                JOIN orders ON orders.command_id = commands.command_id
+                JOIN submission_claims AS claims ON claims.command_id = commands.command_id
+                WHERE commands.command_id = ?
+                """,
+                (admission.command_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row[1] != admission.client_order_id
+                or row[2] != admission.reconciliation_job_id
+                or row[3] != OrderState.SUBMITTING.value
+                or row[4] != admission.claim_token
+                or row[5] != "admitted"
+            ):
+                raise LedgerStorageError("cannot begin outbound submission from durable state")
+            started = connection.execute(
+                """
+                UPDATE submission_claims SET status = ?
+                WHERE command_id = ? AND claim_token = ? AND status = ?
+                """,
+                ("outbound_started", admission.command_id, admission.claim_token, "admitted"),
+            )
+            if started.rowcount != 1:
+                raise LedgerStorageError("cannot begin outbound submission from durable state")
+            command = _command_from_canonical_json(row[0])
+            if command.command_id != admission.command_id or command.client_order_id != row[1]:
+                raise LedgerStorageError("durable command identity does not match admission")
+            return OutboundSubmission(
+                command=command,
+                command_id=admission.command_id,
+                client_order_id=row[1],
+                reconciliation_job_id=row[2],
+                outbound_attempt_token=_new_id("outbound-attempt"),
+            )
 
     def mark_submission_ambiguous(
         self,
@@ -202,17 +256,18 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 raise LedgerStorageError("submission admission does not match a durable claim")
             previous_state = OrderState(row[1])
             if previous_state is OrderState.SUBMISSION_UNKNOWN:
-                if row[4] not in {"admitted", "consumed"}:
+                if row[4] not in {"admitted", "consumed", "outbound_started"}:
                     raise LedgerStorageError("ambiguous submission has an invalid durable claim status")
-                connection.execute(
-                    """
-                    UPDATE submission_claims SET status = ?
-                    WHERE command_id = ? AND claim_token = ? AND status = ?
-                    """,
-                    ("consumed", admission.command_id, admission.claim_token, "admitted"),
-                )
+                if row[4] == "admitted":
+                    connection.execute(
+                        """
+                        UPDATE submission_claims SET status = ?
+                        WHERE command_id = ? AND claim_token = ? AND status = ?
+                        """,
+                        ("consumed", admission.command_id, admission.claim_token, "admitted"),
+                    )
                 return
-            if row[4] != "admitted":
+            if row[4] not in {"admitted", "outbound_started"}:
                 raise LedgerStorageError("submission claim is no longer live")
             next_state = assert_transition(previous_state, event)
             now = _timestamp_text(self.utc_now())
@@ -236,15 +291,16 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 """,
                 (event.value, "queued", now, admission.reconciliation_job_id),
             )
-            consumed = connection.execute(
-                """
-                UPDATE submission_claims SET status = ?
-                WHERE command_id = ? AND claim_token = ? AND status = ?
-                """,
-                ("consumed", admission.command_id, admission.claim_token, "admitted"),
-            )
-            if consumed.rowcount != 1:
-                raise LedgerStorageError("submission claim could not be consumed")
+            if row[4] == "admitted":
+                consumed = connection.execute(
+                    """
+                    UPDATE submission_claims SET status = ?
+                    WHERE command_id = ? AND claim_token = ? AND status = ?
+                    """,
+                    ("consumed", admission.command_id, admission.claim_token, "admitted"),
+                )
+                if consumed.rowcount != 1:
+                    raise LedgerStorageError("submission claim could not be consumed")
 
     def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
         """Load queued non-terminal work using the first persisted identities."""
@@ -287,7 +343,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
             row = connection.execute(
                 """
                 SELECT commands.client_order_id, jobs.job_id, orders.lifecycle_state, orders.evidence_cursor,
-                       orders.exchange_order_id
+                       orders.exchange_order_id, orders.filled_quantity, orders.filled_notional
                 FROM order_commands AS commands
                 JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
                 JOIN orders ON orders.command_id = commands.command_id
@@ -341,14 +397,28 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 detail={"source": "reconciliation", "evidence": canonicalize(evidence)},
                 evidence=evidence,
             )
+            filled_quantity = row[5]
+            filled_notional = row[6]
+            if evidence.state in {OrderState.PARTIALLY_FILLED, OrderState.FILLED}:
+                filled_quantity = decimal_to_canonical(evidence.filled_quantity)
+                filled_notional = decimal_to_canonical(
+                    evidence.filled_quantity * evidence.average_fill_price
+                )
             connection.execute(
                 """
                 UPDATE orders
                 SET exchange_order_id = COALESCE(?, exchange_order_id),
-                    lifecycle_state = ?, evidence_cursor = ?
+                    lifecycle_state = ?, evidence_cursor = ?, filled_quantity = ?, filled_notional = ?
                 WHERE command_id = ?
                 """,
-                (evidence.exchange_order_id, next_state.value, evidence.evidence_id, job.command_id),
+                (
+                    evidence.exchange_order_id,
+                    next_state.value,
+                    evidence.evidence_id,
+                    filled_quantity,
+                    filled_notional,
+                    job.command_id,
+                ),
             )
             terminal = next_state in {
                 OrderState.FILLED,
@@ -412,18 +482,11 @@ class SQLiteExecutionLedger(ExecutionLedger):
             )
             return False
 
-    def record_account_observation(
-        self,
-        *,
-        account_id: str,
-        product: str,
-        source: str,
-        payload: Mapping[str, Any],
-    ) -> str:
-        """Persist a sanitized canonical observation for later reconciliation queries."""
-        if not all((account_id, product, source)):
-            raise ValueError("account observation requires account, product, and source")
-        payload_json = _canonical_json(canonicalize(dict(payload)))
+    def record_account_observation(self, observation: AccountObservation) -> str:
+        """Persist one typed canonical observation without accepting raw venue payloads."""
+        if type(observation) is not AccountObservation:
+            raise TypeError("account observation must be an AccountObservation")
+        payload_json = _canonical_json(canonicalize(observation))
         observation_id = _new_id("observation")
         with transaction(self._require_connection()):
             self._require_connection().execute(
@@ -434,15 +497,337 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 """,
                 (
                     observation_id,
-                    account_id,
-                    product,
-                    _timestamp_text(self.utc_now()),
-                    source,
+                    observation.account_id,
+                    observation.product.value,
+                    _timestamp_text(observation.observed_at),
+                    "canonical_account_observation",
                     payload_json,
                     hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
                 ),
             )
         return observation_id
+
+    def record_conversion_rejection(
+        self,
+        snapshot: SourceAnalysisSnapshot,
+        target: ExecutionTarget,
+        reason: ConversionRejectionReason,
+    ) -> None:
+        """Persist a D-02 rejection using only stable source and target metadata."""
+        if type(snapshot) is not SourceAnalysisSnapshot or type(target) is not ExecutionTarget:
+            raise TypeError("proposal rejection requires canonical snapshot and target values")
+        if type(reason) is not ConversionRejectionReason:
+            raise TypeError("proposal rejection requires a stable conversion reason")
+        connection = self._require_connection()
+        with transaction(connection):
+            snapshot_digest = self._record_proposal_source(snapshot, target)
+            now = _timestamp_text(self.utc_now())
+            self._append_proposal_audit_fact(
+                kind="conversion_rejected",
+                source_id=snapshot.source_id,
+                source_digest=snapshot_digest,
+                snapshot_digest=snapshot_digest,
+                intent_digest=None,
+                policy_digest=None,
+                evidence_digest=None,
+                reason_code=reason.value,
+                fee_amount=None,
+                observed_at=_timestamp_text(snapshot.completed_at),
+                recorded_at=now,
+                summary={
+                    "target_id": target.target_id,
+                    "mode": target.mode,
+                    "account_id": target.account_id,
+                    "product": target.product,
+                    "reason_code": reason.value,
+                },
+            )
+
+    def record_candidate(self, candidate: CandidateExecutionIntent) -> None:
+        """Persist an accepted candidate and its immutable source provenance."""
+        if type(candidate) is not CandidateExecutionIntent:
+            raise TypeError("candidate audit requires a CandidateExecutionIntent")
+        connection = self._require_connection()
+        with transaction(connection):
+            snapshot_digest = self._record_candidate_source(candidate)
+            now = _timestamp_text(self.utc_now())
+            candidate_json = _canonical_json(canonicalize(candidate))
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO proposal_candidates(
+                    intent_digest, snapshot_digest, candidate_json, recorded_at_utc
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (candidate.intent_digest, snapshot_digest, candidate_json, now),
+            )
+            self._append_proposal_audit_fact(
+                kind="candidate_accepted",
+                source_id=candidate.source_id,
+                source_digest=candidate.intent_digest,
+                snapshot_digest=snapshot_digest,
+                intent_digest=candidate.intent_digest,
+                policy_digest=None,
+                evidence_digest=None,
+                reason_code=None,
+                fee_amount=None,
+                observed_at=_timestamp_text(candidate.source_completed_at),
+                recorded_at=now,
+                summary={
+                    "target_id": candidate.target.target_id,
+                    "mode": candidate.target.mode,
+                    "account_id": candidate.target.account_id,
+                    "product": candidate.target.product,
+                    "symbol": candidate.symbol,
+                    "side": candidate.side,
+                    "order_type": candidate.order_type,
+                },
+            )
+
+    def record_evidence(self, candidate: CandidateExecutionIntent, evidence: EvidenceBundle) -> None:
+        """Persist a complete canonical bundle tied to an existing accepted candidate."""
+        if type(candidate) is not CandidateExecutionIntent or type(evidence) is not EvidenceBundle:
+            raise TypeError("evidence audit requires canonical candidate and evidence values")
+        connection = self._require_connection()
+        with transaction(connection):
+            snapshot_digest = self._candidate_snapshot_digest(candidate)
+            now = _timestamp_text(self.utc_now())
+            evidence_json = _canonical_json(canonicalize(evidence))
+            inserted = connection.execute(
+                """
+                INSERT OR IGNORE INTO proposal_evidence(
+                    evidence_digest, intent_digest, evidence_json, observed_at_utc, recorded_at_utc
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence.evidence_digest,
+                    candidate.intent_digest,
+                    evidence_json,
+                    _timestamp_text(evidence.quote.observed_at),
+                    now,
+                ),
+            )
+            if inserted.rowcount:
+                self._append_proposal_audit_fact(
+                    kind="evidence_recorded",
+                    source_id=candidate.source_id,
+                    source_digest=candidate.intent_digest,
+                    snapshot_digest=snapshot_digest,
+                    intent_digest=candidate.intent_digest,
+                    policy_digest=None,
+                    evidence_digest=evidence.evidence_digest,
+                    reason_code=None,
+                    fee_amount=None,
+                    observed_at=_timestamp_text(evidence.quote.observed_at),
+                    recorded_at=now,
+                    summary={
+                        "target_id": candidate.target.target_id,
+                        "symbol": candidate.symbol,
+                        "quote_identifier": evidence.fee_rate.quote_identifier,
+                        "fee_rate_version": evidence.fee_rate.rate_version,
+                    },
+                )
+
+    def record_risk_assessment(
+        self, candidate: CandidateExecutionIntent, assessment: RiskAssessment
+    ) -> None:
+        """Persist a redacted, reproducible risk decision without issuing a ticket."""
+        if type(candidate) is not CandidateExecutionIntent or type(assessment) is not RiskAssessment:
+            raise TypeError("risk audit requires canonical candidate and assessment values")
+        connection = self._require_connection()
+        with transaction(connection):
+            snapshot_digest = self._candidate_snapshot_digest(candidate)
+            now = _timestamp_text(self.utc_now())
+            fee_amount = (
+                decimal_to_canonical(assessment.fee_estimate.amount)
+                if assessment.fee_estimate is not None
+                else None
+            )
+            assessment_id = _new_id("proposal-assessment")
+            reason_codes = tuple(reason.value for reason in assessment.reason_codes)
+            connection.execute(
+                """
+                INSERT INTO proposal_risk_assessments(
+                    assessment_id, intent_digest, accepted, policy_version, policy_digest,
+                    evidence_digest, reason_codes_json, fee_amount, assessment_json,
+                    observed_at_utc, recorded_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assessment_id,
+                    candidate.intent_digest,
+                    int(assessment.accepted),
+                    assessment.policy_version,
+                    assessment.policy_digest,
+                    assessment.evidence_digest,
+                    _canonical_json(reason_codes),
+                    fee_amount,
+                    _canonical_json(canonicalize(assessment)),
+                    now,
+                    now,
+                ),
+            )
+            self._append_proposal_audit_fact(
+                kind="risk_assessed" if assessment.accepted else "risk_rejected",
+                source_id=candidate.source_id,
+                source_digest=candidate.intent_digest,
+                snapshot_digest=snapshot_digest,
+                intent_digest=candidate.intent_digest,
+                policy_digest=assessment.policy_digest,
+                evidence_digest=assessment.evidence_digest,
+                reason_code=reason_codes[0] if reason_codes else None,
+                fee_amount=fee_amount,
+                observed_at=now,
+                recorded_at=now,
+                summary={
+                    "accepted": assessment.accepted,
+                    "policy_version": assessment.policy_version,
+                    "reason_codes": reason_codes,
+                    "fee_rate_version": (
+                        assessment.fee_estimate.rate_version
+                        if assessment.fee_estimate is not None
+                        else None
+                    ),
+                    "quote_identifier": (
+                        assessment.fee_estimate.quote_identifier
+                        if assessment.fee_estimate is not None
+                        else None
+                    ),
+                },
+            )
+
+    def list_proposal_audit_facts(self) -> tuple[ProposalAuditFact, ...]:
+        """Load controlled audit facts in durable insertion order for pre-ticket review."""
+        rows = self._require_connection().execute(
+            """
+            SELECT kind, source_id, source_digest, policy_digest, evidence_digest,
+                   reason_code, fee_amount, observed_at_utc, recorded_at_utc, summary_json
+            FROM proposal_audit_facts
+            ORDER BY recorded_at_utc, rowid
+            """
+        ).fetchall()
+        return tuple(
+            ProposalAuditFact(
+                kind=row[0],
+                source_id=row[1],
+                source_digest=row[2],
+                policy_digest=row[3],
+                evidence_digest=row[4],
+                reason_code=row[5],
+                fee_amount=row[6],
+                observed_at=_timestamp_from_text(row[7]),
+                recorded_at=_timestamp_from_text(row[8]),
+                summary_json=row[9],
+            )
+            for row in rows
+        )
+
+    def _record_proposal_source(
+        self, snapshot: SourceAnalysisSnapshot, target: ExecutionTarget
+    ) -> str:
+        """Insert one immutable source snapshot projection and return its digest."""
+        snapshot_digest = hashlib.sha256(
+            _canonical_json(canonicalize(snapshot)).encode("utf-8")
+        ).hexdigest()
+        self._require_connection().execute(
+            """
+            INSERT OR IGNORE INTO proposal_sources(
+                snapshot_digest, source_id, completed_at_utc, schema_version,
+                parser_version, decision_digest, target_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_digest,
+                snapshot.source_id,
+                _timestamp_text(snapshot.completed_at),
+                snapshot.schema_version,
+                snapshot.parser_version,
+                snapshot.decision_digest,
+                _canonical_json(canonicalize(target)),
+            ),
+        )
+        return snapshot_digest
+
+    def _record_candidate_source(self, candidate: CandidateExecutionIntent) -> str:
+        """Persist source metadata reconstructed from the candidate's frozen provenance."""
+        snapshot_digest = self._candidate_snapshot_digest(candidate)
+        self._require_connection().execute(
+            """
+            INSERT OR IGNORE INTO proposal_sources(
+                snapshot_digest, source_id, completed_at_utc, schema_version,
+                parser_version, decision_digest, target_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_digest,
+                candidate.source_id,
+                _timestamp_text(candidate.source_completed_at),
+                candidate.source_schema_version,
+                candidate.source_parser_version,
+                candidate.source_decision_digest,
+                _canonical_json(canonicalize(candidate.target)),
+            ),
+        )
+        return snapshot_digest
+
+    @staticmethod
+    def _candidate_snapshot_digest(candidate: CandidateExecutionIntent) -> str:
+        """Hash only the frozen analysis provenance retained by a candidate."""
+        return hashlib.sha256(
+            _canonical_json(
+                canonicalize(
+                    {
+                        "source_id": candidate.source_id,
+                        "source_completed_at": candidate.source_completed_at,
+                        "source_schema_version": candidate.source_schema_version,
+                        "source_parser_version": candidate.source_parser_version,
+                        "source_decision_digest": candidate.source_decision_digest,
+                        "target": candidate.target,
+                    }
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _append_proposal_audit_fact(
+        self,
+        *,
+        kind: str,
+        source_id: str,
+        source_digest: str,
+        snapshot_digest: str,
+        intent_digest: str | None,
+        policy_digest: str | None,
+        evidence_digest: str | None,
+        reason_code: str | None,
+        fee_amount: str | None,
+        observed_at: str,
+        recorded_at: str,
+        summary: Mapping[str, Any],
+    ) -> None:
+        """Append one allowlisted fact while the caller's transaction is active."""
+        self._require_connection().execute(
+            """
+            INSERT INTO proposal_audit_facts(
+                fact_id, kind, source_id, source_digest, source_snapshot_digest,
+                intent_digest, policy_digest, evidence_digest, reason_code, fee_amount,
+                observed_at_utc, recorded_at_utc, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("proposal-audit"),
+                kind,
+                source_id,
+                source_digest,
+                snapshot_digest,
+                intent_digest,
+                policy_digest,
+                evidence_digest,
+                reason_code,
+                fee_amount,
+                observed_at,
+                recorded_at,
+                _canonical_json(dict(summary)),
+            ),
+        )
 
     def _load_admission(self, logical_command_key: str) -> SubmissionAdmission | None:
         """Load persisted identities for a repeat without allocating any new authority."""
@@ -556,6 +941,43 @@ def _lifecycle_event_for_evidence(evidence: GatewayEvidence) -> LifecycleEvent:
         raise ReconciliationEvidenceError(
             f"evidence state {evidence.state.value} is not a remote lifecycle observation"
         ) from exc
+def _command_from_canonical_json(command_json: str) -> ExecutionCommand:
+    """Rebuild the sole ledger-persisted command without accepting caller input."""
+    try:
+        data = json.loads(command_json)
+        context_data = data["context"]
+        product = ProductType(context_data["product"])
+        if product is ProductType.SPOT:
+            context = SpotOrderContext()
+        elif product is ProductType.ISOLATED_MARGIN:
+            context = IsolatedMarginOrderContext(
+                isolated_symbol=context_data["isolated_symbol"],
+                borrow_asset=context_data.get("borrow_asset"),
+                auto_repay=context_data.get("auto_repay", False),
+            )
+        else:
+            context = UsdtPerpetualOrderContext(
+                leverage=context_data["leverage"],
+                margin_mode=context_data["margin_mode"],
+                position_mode=context_data["position_mode"],
+            )
+        return ExecutionCommand(
+            command_id=data["command_id"],
+            logical_command_key=data["logical_command_key"],
+            client_order_id=data["client_order_id"],
+            mode=Mode(data["mode"]),
+            account_id=data["account_id"],
+            symbol=data["symbol"],
+            side=Side(data["side"]),
+            order_type=OrderType(data["order_type"]),
+            quantity=data["quantity"],
+            context=context,
+            price=data.get("price"),
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise LedgerStorageError("stored command JSON is invalid") from exc
+
+
 def _canonical_json(value: Any) -> str:
     """Serialize canonical values deterministically for durable comparison and auditing."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -571,3 +993,11 @@ def _timestamp_text(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("ledger timestamps must be timezone-aware")
     return value.astimezone(UTC).isoformat()
+
+
+def _timestamp_from_text(value: str) -> datetime:
+    """Restore a persisted UTC timestamp for an audit-query value object."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise LedgerStorageError("stored audit timestamp is not timezone-aware")
+    return parsed.astimezone(UTC)

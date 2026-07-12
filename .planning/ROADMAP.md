@@ -86,14 +86,33 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 **Plans**: 8/12 plans executed; 4 gap-closure plans queued
 
 Plans:
+**Wave 1**
 
 - [x] 02-01-PLAN.md — Define immutable analysis snapshots and deterministic candidate conversion.
 - [x] 02-02-PLAN.md — Add credential references, recursive redaction, and non-secret settings.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [x] 02-03-PLAN.md — Define selected-target product risk policies and pure risk assessment.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [x] 02-04-PLAN.md — Refresh complete evidence and persist controlled proposal/risk audit outcomes.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [x] 02-05-PLAN.md — Persist controlled proposal, rejection, evidence, and risk-audit records.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [x] 02-08-PLAN.md — Issue exactly one pending approval ticket from persisted eligible proposal facts and manage its lifecycle.
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [x] 02-07-PLAN.md — Atomically consume a current approval ticket into the sole outbound authorization.
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
 - [x] 02-06-PLAN.md — Latch, recover, and verify the persistent kill-switch boundary.
 
 **Gap Closure Plans**

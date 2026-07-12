@@ -35,6 +35,7 @@ from pa_agent.trading.domain.risk import (
     OrderRateObservation,
     TargetConnectionObservation,
 )
+from pa_agent.trading.domain.zero_scope_clearance import ZeroScopeClearanceProof
 from pa_agent.trading.persistence.sqlite_connection import (
     open_sqlite_connection,
 )
@@ -540,6 +541,76 @@ def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
         reopened.close()
 
 
+def test_zero_scope_begin_proof_cannot_complete_recovery_after_reopen(
+    execution_database_path: Path,
+) -> None:
+    """A persisted transition rejects a caller replaying the saved begin proof."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    gateway = _CancellationGateway({})
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        assert service.begin_recovery("operator-1", assessment_ids=())
+        saved_begin_proof = _zero_scope_proof_from_event(execution_database_path, "recovering")
+        baseline = _zero_scope_transition_snapshot(execution_database_path)
+    finally:
+        ledger.close()
+
+    reopened = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    try:
+        assert not reopened.complete_kill_switch_recovery(
+            "operator-1", assessment_ids=(), zero_scope_proof=saved_begin_proof
+        )
+        assert reopened.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
+        assert _zero_scope_transition_snapshot(execution_database_path) == baseline
+        assert reopened.count_recovery_assessments() == 0
+        assert _authorization_row_counts(execution_database_path) == baseline["authorization"]
+        assert gateway.submit_call_count == 0
+
+        resumed = KillSwitchService(ledger=reopened, gateway=gateway, utc_now=clock.utc_now)
+        assert resumed.complete_recovery("operator-1", assessment_ids=())
+        assert reopened.get_kill_switch_state().status is KillSwitchStatus.READY
+        completed = _zero_scope_transition_snapshot(execution_database_path)
+        assert completed["events"] == baseline["events"] + 1
+        assert completed["pending"] == 0
+        assert completed["consumed"] == 1
+        assert gateway.submit_call_count == 0
+    finally:
+        reopened.close()
+
+
+def test_zero_scope_persisted_transition_expiry_rejects_fresh_matching_proof(
+    execution_database_path: Path,
+) -> None:
+    """Durable challenge expiry fails before any transition or authority mutation."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    gateway = _CancellationGateway({})
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        assert service.begin_recovery("operator-1", assessment_ids=())
+        begin_proof = _zero_scope_proof_from_event(execution_database_path, "recovering")
+        transition = _pending_zero_scope_transition(execution_database_path)
+        clock.now = datetime.fromisoformat(transition["challenge_expires_at_utc"]) + timedelta(seconds=1)
+        fresh_matching_proof = _fresh_zero_scope_proof(
+            begin_proof, clock.now, transition["transition_challenge"]
+        )
+        baseline = _zero_scope_transition_snapshot(execution_database_path)
+
+        assert not ledger.complete_kill_switch_recovery(
+            "operator-1", assessment_ids=(), zero_scope_proof=fresh_matching_proof
+        )
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
+        assert _zero_scope_transition_snapshot(execution_database_path) == baseline
+        assert ledger.count_recovery_assessments() == 0
+        assert _authorization_row_counts(execution_database_path) == baseline["authorization"]
+        assert gateway.submit_call_count == 0
+    finally:
+        ledger.close()
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -652,5 +723,74 @@ def _kill_switch_event_count(database_path: Path) -> int:
     connection = open_sqlite_connection(database_path)
     try:
         return int(connection.execute("SELECT COUNT(*) FROM kill_switch_events").fetchone()[0])
+    finally:
+        connection.close()
+
+
+def _zero_scope_proof_from_event(database_path: Path, status: str) -> ZeroScopeClearanceProof:
+    connection = open_sqlite_connection(database_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT zero_scope_clearance_proof_json
+            FROM kill_switch_events
+            WHERE status = ?
+            ORDER BY occurred_at_utc, rowid DESC LIMIT 1
+            """,
+            (status,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return ZeroScopeClearanceProof.from_canonical_json(row[0])
+
+
+def _pending_zero_scope_transition(database_path: Path) -> dict[str, str]:
+    connection = open_sqlite_connection(database_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT transition_challenge, challenge_expires_at_utc
+            FROM zero_scope_recovery_transitions
+            WHERE status = 'pending'
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return {"transition_challenge": row[0], "challenge_expires_at_utc": row[1]}
+
+
+def _fresh_zero_scope_proof(
+    begin_proof: ZeroScopeClearanceProof, now: datetime, transition_challenge: str
+) -> ZeroScopeClearanceProof:
+    return replace(
+        begin_proof,
+        account=replace(begin_proof.account, observed_at=now),
+        open_orders=replace(begin_proof.open_orders, observed_at=now),
+        connection=replace(begin_proof.connection, observed_at=now),
+        server_time=replace(begin_proof.server_time, server_time=now, observed_at=now),
+        collected_at=now,
+        transition_challenge=transition_challenge,
+    )
+
+
+def _zero_scope_transition_snapshot(database_path: Path) -> dict[str, object]:
+    connection = open_sqlite_connection(database_path)
+    try:
+        pending, consumed = connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status = 'consumed' THEN 1 ELSE 0 END)
+            FROM zero_scope_recovery_transitions
+            """
+        ).fetchone()
+        return {
+            "events": int(connection.execute("SELECT COUNT(*) FROM kill_switch_events").fetchone()[0]),
+            "pending": int(pending or 0),
+            "consumed": int(consumed or 0),
+            "authorization": _authorization_row_counts(database_path),
+        }
     finally:
         connection.close()

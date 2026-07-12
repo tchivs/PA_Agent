@@ -394,18 +394,18 @@ class ApprovalMachine(RuleBasedStateMachine):
 | SAFE-02 | 每次风险检查刷新所有关键证据；任一失败关闭 | unit + integration + property | `.venv/bin/pytest -q tests/unit/execution/test_risk_engine.py tests/integration/execution/test_fresh_evidence_risk.py` | Wave 0 |
 | SAFE-03 | 锁存跨重启阻止新提交、撤销票据、请求取消且显式恢复 | integration + property | `.venv/bin/pytest -q tests/integration/execution/test_kill_switch.py tests/property/execution/test_approval_kill_switch_machine.py` | Wave 0 |
 | SAFE-04 | 完整票据、绑定失效、过期和双击仅消费一次 | unit + integration + property | `.venv/bin/pytest -q tests/unit/execution/test_approval_ticket.py tests/integration/execution/test_approval_consumption.py` | Wave 0 |
-| SAFE-05 | 设置/日志/审计/通知/异常中不出现合成秘密 | unit + integration | `.venv/bin/pytest -q tests/unit/execution/test_secret_redaction.py tests/integration/execution/test_secret_nonpersistence.py` | Wave 0 |
+| SAFE-05 | 设置/日志/审计/通知/异常中不出现合成秘密，且声明提币权限的凭据引用或提供者在执行前被拒绝 | unit + integration | `.venv/bin/pytest -q tests/unit/execution/test_secret_redaction.py tests/integration/execution/test_secret_nonpersistence.py` | Wave 0 |
 
 ### Sampling Rate
 
 - **Per task commit:** `.venv/bin/pytest -q tests/unit/execution`
 - **Per wave merge:** `.venv/bin/pytest -q tests/unit/execution tests/integration/execution tests/property/execution`
-- **Phase gate:** 完整执行测试组和 `ruff check pa_agent/trading tests` 通过后再执行 `/gsd-verify-work`。
+- **Phase gate:** 完整执行测试组和 `.venv/bin/ruff check pa_agent/trading tests` 通过后再执行 `/gsd-verify-work`。
 
 ### Wave 0 Gaps
 
 - [ ] `tests/unit/execution/test_intent_factory.py` — 覆盖 CORE-03 的转换契约与 reason code。
-- [ ] `tests/unit/execution/test_risk_engine.py`、`test_approval_ticket.py`、`test_secret_redaction.py` — 覆盖纯领域规则。
+- [ ] `tests/unit/execution/test_risk_engine.py`、`test_approval_ticket.py`、`test_secret_redaction.py` — 覆盖纯领域规则、交易专用不可提币凭据能力与拒绝路径。
 - [ ] `tests/integration/execution/test_approval_audit_ledger.py`、`test_fresh_evidence_risk.py`、`test_approval_consumption.py`、`test_kill_switch.py` — 覆盖真实 SQLite 原子性、重启和伪网关。
 - [ ] `tests/property/execution/test_approval_kill_switch_machine.py` — 覆盖票据/熔断/重启交错。
 - [ ] 扩展 `tests/fixtures/fake_exchange.py` 为可脚本化能力、规则、账户、报价、服务器时间和连接状态的 fake；保留零真实网络断言。

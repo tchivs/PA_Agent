@@ -27,6 +27,7 @@ from pa_agent.trading.domain.risk import (
     TargetConnectionObservation,
     select_phase2_policy,
 )
+from pa_agent.trading.persistence.sqlite_connection import open_sqlite_connection
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
 from pa_agent.trading.ports.gateway import GatewayUnavailableError
 from tests.fixtures.execution_factories import (
@@ -73,6 +74,48 @@ def _service(ledger: SQLiteExecutionLedger, gateway: ScriptedEvidenceGateway) ->
         evidence_collector=FreshEvidenceCollector(gateway=gateway, utc_now=lambda: NOW),
         risk_engine=RiskEngine(),
     )
+
+
+def test_stale_source_rejection_survives_reopen_without_candidate_or_submission_artifacts(
+    execution_database_path,
+) -> None:
+    """A stale source rejects durably before candidate or submission authority exists."""
+    ledger = SQLiteExecutionLedger(execution_database_path)
+    target = make_execution_target()
+    gateway = _gateway()
+    service = ProposalService(
+        ledger=ledger,
+        intent_factory=IntentFactory(utc_now=lambda: NOW),
+        evidence_collector=FreshEvidenceCollector(gateway=gateway, utc_now=lambda: NOW),
+        risk_engine=RiskEngine(),
+    )
+
+    candidate = service.propose(
+        make_source_analysis_snapshot(completed_at=datetime(2020, 1, 1, tzinfo=UTC)), target
+    )
+    ledger.close()
+
+    assert candidate is None
+    assert gateway.submit_call_count == 0
+
+    inspection = open_sqlite_connection(execution_database_path)
+    try:
+        assert inspection.execute("SELECT COUNT(*) FROM proposal_candidates").fetchone()[0] == 0
+        assert inspection.execute("SELECT COUNT(*) FROM approval_tickets").fetchone()[0] == 0
+        assert inspection.execute("SELECT COUNT(*) FROM order_commands").fetchone()[0] == 0
+        assert inspection.execute("SELECT COUNT(*) FROM submission_claims").fetchone()[0] == 0
+    finally:
+        inspection.close()
+
+    reopened = SQLiteExecutionLedger(execution_database_path)
+    facts = reopened.list_proposal_audit_facts()
+    reopened.close()
+
+    assert [(fact.kind, fact.reason_code) for fact in facts] == [
+        ("conversion_rejected", ConversionRejectionReason.SOURCE_ANALYSIS_STALE.value)
+    ]
+    assert facts[0].source_id == "analysis-001"
+    assert facts[0].source_digest
 
 
 def test_conversion_and_evidence_rejections_survive_reopen_as_redacted_audit_facts(

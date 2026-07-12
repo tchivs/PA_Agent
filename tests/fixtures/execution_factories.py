@@ -94,10 +94,10 @@ def make_analysis_recommendation(**overrides: object) -> AnalysisRecommendation:
 
 
 def make_source_analysis_snapshot(**overrides: object) -> SourceAnalysisSnapshot:
-    """Build a deterministic completed snapshot for intent conversion tests."""
+    """Build a completed snapshot for intent conversion tests."""
     values: dict[str, object] = {
         "source_id": "analysis-001",
-        "completed_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "completed_at": datetime.now(UTC),
         "schema_version": "analysis-schema-v1",
         "parser_version": "parser-v1",
         "recommendation": make_analysis_recommendation(),

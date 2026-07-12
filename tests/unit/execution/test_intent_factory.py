@@ -1,7 +1,7 @@
 """Offline contract tests for the immutable analysis-to-intent boundary."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -33,6 +33,25 @@ def test_completed_snapshot_produces_paper_spot_candidate_bound_to_source() -> N
     assert candidate.auto_ticket_eligible is True
     assert candidate.side is Side.BUY
     assert candidate.quantity == Decimal("0.125")
+
+
+def test_source_snapshot_at_exact_freshness_boundary_produces_candidate() -> None:
+    now = datetime(2026, 7, 12, 11, 0, tzinfo=UTC)
+    snapshot = make_source_analysis_snapshot(completed_at=now - timedelta(seconds=60))
+
+    candidate = IntentFactory(utc_now=lambda: now).propose(snapshot, make_execution_target())
+
+    assert candidate.source_id == snapshot.source_id
+
+
+def test_source_snapshot_older_than_freshness_boundary_rejects_before_candidate() -> None:
+    now = datetime(2026, 7, 12, 11, 0, tzinfo=UTC)
+    snapshot = make_source_analysis_snapshot(completed_at=now - timedelta(seconds=61))
+
+    with pytest.raises(ConversionRejection) as raised:
+        IntentFactory(utc_now=lambda: now).propose(snapshot, make_execution_target())
+
+    assert raised.value.reason is ConversionRejectionReason.SOURCE_ANALYSIS_STALE
 
 
 @pytest.mark.parametrize(

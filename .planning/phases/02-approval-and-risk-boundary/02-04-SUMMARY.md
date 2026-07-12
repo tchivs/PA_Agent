@@ -156,9 +156,17 @@ Passed:
 - **Verification:** Full execution test suite and Ruff pass.
 - **Committed in:** `3777f26`
 
+**4. [Rule 1 - Bug] Restored compact state after the SDK parsed the complete summary as a decision**
+- **Found during:** Plan metadata update
+- **Issue:** The installed `state.add-decision --summary-file` handler appended the entire summary frontmatter and body to `STATE.md` instead of extracting concise decisions.
+- **Fix:** Restored the state document to its compact shape, retained the Plan 02-04 metric and session updates, and recorded one concise collector decision.
+- **Files modified:** `.planning/STATE.md`
+- **Verification:** `STATE.md` is 120 lines and records Plan 5 of 8 with 12 completed plans and 71 percent progress.
+- **Committed in:** plan metadata commit
+
 ---
 
-**Total deviations:** 3 auto-fixed (2 Rule 1 bugs, 1 Rule 2 missing critical completeness control).
+**Total deviations:** 4 auto-fixed (3 Rule 1 bugs, 1 Rule 2 missing critical completeness control).
 **Impact on plan:** All corrections were necessary to prove a complete, typed, fail-closed evidence boundary. They add no ledger, audit-persistence, ticket, or gateway-submission authority.
 
 ## Issues Encountered

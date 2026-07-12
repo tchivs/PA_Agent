@@ -476,3 +476,64 @@ def test_invalid_controlled_observations_cannot_allocate_accepted_recovery_autho
         assert gateway.submit_call_count == 0
     finally:
         ledger.close()
+
+
+def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
+    execution_database_path: Path,
+) -> None:
+    """A no-order latch may recover only through two fresh ID-free proof events."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    gateway = _CancellationGateway({})
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        assert ledger.list_kill_switch_recovery_scopes() == ()
+        assert ledger.count_recovery_assessments() == 0
+        assert service.begin_recovery("operator-1", assessment_ids=()) is True
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
+    finally:
+        ledger.close()
+
+    reopened = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    resumed = KillSwitchService(ledger=reopened, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        assert resumed.complete_recovery("operator-1", assessment_ids=()) is True
+        assert reopened.get_kill_switch_state().status is KillSwitchStatus.READY
+        assert reopened.count_recovery_assessments() == 0
+        assert gateway.submit_call_count == 0
+
+        inspection = open_sqlite_connection(execution_database_path)
+        try:
+            events = inspection.execute(
+                """
+                SELECT status, actor_label, recovery_assessment_ids_json,
+                       zero_scope_clearance_proof_json, zero_scope_clearance_summary
+                FROM kill_switch_events
+                WHERE status IN ('recovering', 'ready')
+                ORDER BY occurred_at_utc, rowid
+                """
+            ).fetchall()
+        finally:
+            inspection.close()
+        assert [row[0] for row in events] == ["recovering", "ready"]
+        assert all(row[1] == "operator-1" and row[2] == "[]" for row in events)
+        for _, _, _, proof_json, summary in events:
+            assert isinstance(summary, str) and summary
+            proof = json.loads(proof_json)
+            assert set(proof) == {
+                "account",
+                "clearance_summary",
+                "collected_at",
+                "connection",
+                "open_orders",
+                "positions",
+                "server_time",
+                "target",
+            }
+            assert proof["open_orders"]["count"] == 0
+            assert proof["positions"] == []
+            assert "recovery_assessment_id" not in proof
+    finally:
+        reopened.close()

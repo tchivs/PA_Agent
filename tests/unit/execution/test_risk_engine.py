@@ -6,8 +6,8 @@ from decimal import Decimal
 
 import pytest
 
-from pa_agent.trading.application.risk_engine import RiskEngine
 from pa_agent.trading.application.intent_factory import IntentFactory
+from pa_agent.trading.application.risk_engine import RiskEngine
 from pa_agent.trading.domain.errors import DecimalValueError, RiskRejectionReason
 from pa_agent.trading.domain.models import (
     Balance,

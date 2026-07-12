@@ -96,12 +96,19 @@ class CandidateExecutionIntent:
     side: Side
     order_type: OrderType
     quantity: Decimal
-    price: Decimal
+    price: Decimal | None
     risk_basis: Decimal
     auto_ticket_eligible: bool = True
     intent_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.order_type is OrderType.LIMIT:
+            if self.price is None:
+                raise ConversionRejection(ConversionRejectionReason.MISSING_PRICE_BASIS)
+            object.__setattr__(self, "price", decimal_from_canonical(self.price))
+        elif self.order_type is OrderType.MARKET:
+            if self.price is not None:
+                raise ConversionRejection(ConversionRejectionReason.SEMANTIC_CONFLICT)
         object.__setattr__(self, "intent_digest", _canonical_digest(self._hash_material()))
 
     def _hash_material(self) -> dict[str, object]:

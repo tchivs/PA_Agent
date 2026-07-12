@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from pa_agent.trading.domain.approval import CandidateExecutionIntent, ExecutionTarget
 from pa_agent.trading.domain.errors import RiskRejection, RiskRejectionReason
-from pa_agent.trading.domain.models import Side, decimal_from_canonical
+from pa_agent.trading.domain.models import OrderType, Side, decimal_from_canonical
 from pa_agent.trading.domain.risk import (
     EvidenceBundle,
     RiskAssessment,
@@ -29,9 +29,12 @@ class RiskEngine:
         reasons: list[RiskRejectionReason] = []
         try:
             quantity = decimal_from_canonical(candidate.quantity)
-            price = decimal_from_canonical(candidate.price)
         except Exception:
             quantity = Decimal("0")
+            reasons.append(RiskRejectionReason.INVALID_ECONOMIC_INPUT)
+        try:
+            price = _execution_price(candidate, evidence)
+        except Exception:
             price = Decimal("0")
             reasons.append(RiskRejectionReason.INVALID_ECONOMIC_INPUT)
         try:
@@ -115,14 +118,35 @@ class RiskEngine:
         ):
             reasons.append(RiskRejectionReason.FEE_EVIDENCE_STALE)
         if not reasons:
-            fee_estimate = estimate_fee(quantity, expected_quote_price, evidence.fee_rate)
+            fee_estimate = estimate_fee(quantity, price, evidence.fee_rate)
             if candidate.side is Side.BUY:
                 available = next(
                     (balance.available for balance in evidence.account.balances if balance.asset == "USDT"),
                     Decimal("0"),
                 )
-                if available < notional + fee_estimate.amount:
+                required_quote = notional
+                if fee_estimate.fee_currency == "USDT":
+                    required_quote += fee_estimate.amount
+                if available < required_quote:
                     reasons.append(RiskRejectionReason.INSUFFICIENT_AVAILABLE_BALANCE)
+            else:
+                base_asset = _base_asset_for_symbol(candidate.symbol)
+                if base_asset is None:
+                    reasons.append(RiskRejectionReason.SYMBOL_NOT_ALLOWED)
+                else:
+                    available = next(
+                        (
+                            balance.available
+                            for balance in evidence.account.balances
+                            if balance.asset == base_asset
+                        ),
+                        Decimal("0"),
+                    )
+                    required_base = quantity
+                    if fee_estimate.fee_currency == base_asset:
+                        required_base += quantity * fee_estimate.rate
+                    if available < required_base:
+                        reasons.append(RiskRejectionReason.INSUFFICIENT_AVAILABLE_BALANCE)
 
         metrics = (
             ("order_notional", notional),
@@ -142,3 +166,18 @@ class RiskEngine:
             evidence_digest=evidence.evidence_digest,
             fee_estimate=fee_estimate,
         )
+
+
+def _execution_price(candidate: CandidateExecutionIntent, evidence: EvidenceBundle) -> Decimal:
+    """Choose the single canonical execution price for every later economic check."""
+    if candidate.order_type is OrderType.LIMIT:
+        return decimal_from_canonical(candidate.price)
+    if candidate.order_type is OrderType.MARKET:
+        quote_price = evidence.quote.ask if candidate.side is Side.BUY else evidence.quote.bid
+        return decimal_from_canonical(quote_price)
+    raise ValueError("candidate order type has no execution-price rule")
+
+
+def _base_asset_for_symbol(symbol: str) -> str | None:
+    """Return the canonical Phase 2 Paper Spot base asset for a supported symbol."""
+    return {"BTCUSDT": "BTC"}.get(symbol)

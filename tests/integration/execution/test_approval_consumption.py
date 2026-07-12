@@ -265,13 +265,13 @@ def test_market_ticket_consumes_once_with_fresh_side_specific_evidence(
     service = _consumer(execution_database_path, clock, gateway)
     try:
         outbound = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        assert service._ledger.list_approval_tickets()[0].status.value == "consumed"
+        SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(outbound)
     finally:
         service.close()
 
     assert candidate.price is None
     assert outbound is not None
-    assert service._ledger.list_approval_tickets()[0].status.value == "consumed"
-    SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(outbound)
     assert len(gateway.outbound_submissions) == 1
 
 

@@ -17,10 +17,12 @@ from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
     InstrumentRules,
+    OrderType,
     Position,
     ProductType,
     QuoteObservation,
     RuleObservation,
+    Side,
     TimeObservation,
 )
 from pa_agent.trading.domain.risk import (
@@ -51,6 +53,7 @@ def _gateway(
     accepted: bool = True,
     positions: tuple[Position, ...] = (),
     quote: QuoteObservation | None = None,
+    balances: tuple[Balance, ...] | None = None,
 ) -> ScriptedEvidenceGateway:
     target = make_execution_target()
     return ScriptedEvidenceGateway(
@@ -59,7 +62,8 @@ def _gateway(
         accounts=[
             make_account_observation(
                 observed_at=NOW,
-                balances=(Balance("USDT", "2000", "1500" if accepted else "1", "0"),),
+                balances=balances
+                or (Balance("USDT", "2000", "1500" if accepted else "1", "0"),),
                 positions=positions,
             )
         ],
@@ -86,12 +90,19 @@ def _service(ledger: SQLiteExecutionLedger, gateway: ScriptedEvidenceGateway) ->
 
 
 def _propose_and_assess(
-    service: ProposalService, *, price: str = "8000", quantity: str = "0.125"
+    service: ProposalService,
+    *,
+    price: str | None = "8000",
+    quantity: str = "0.125",
+    side: Side = Side.BUY,
+    order_type: OrderType = OrderType.LIMIT,
 ):
     target = make_execution_target()
     candidate = service.propose(
         make_source_analysis_snapshot(
-            recommendation=make_analysis_recommendation(price=price, quantity=quantity)
+            recommendation=make_analysis_recommendation(
+                price=price, quantity=quantity, side=side, order_type=order_type
+            )
         ),
         target,
     )
@@ -132,6 +143,31 @@ def test_accepted_persisted_proposal_issues_one_complete_ticket_without_submissi
         assert inspection.execute("SELECT COUNT(*) FROM submission_claims").fetchone()[0] == 0
     finally:
         inspection.close()
+
+
+@pytest.mark.parametrize("side", (Side.BUY, Side.SELL))
+def test_market_proposals_issue_one_ticket_with_side_specific_fresh_economics(
+    execution_database_path, side: Side
+) -> None:
+    """MARKET candidates retain no limit price and still cross the proposal boundary."""
+    ledger = SQLiteExecutionLedger(execution_database_path)
+    balances = (Balance("USDT", "2000", "1500", "0"),)
+    if side is Side.SELL:
+        balances += (Balance("BTC", "1", "1", "0"),)
+    gateway = _gateway(balances=balances)
+    candidate, assessment = _propose_and_assess(
+        _service(ledger, gateway), price=None, side=side, order_type=OrderType.MARKET
+    )
+    tickets = ledger.list_approval_tickets()
+    ledger.close()
+
+    assert candidate.price is None
+    assert assessment.accepted is True
+    assert len(tickets) == 1
+    assert tickets[0].review.expected_price == (
+        Decimal("8000") if side is Side.BUY else Decimal("7999.50")
+    )
+    assert gateway.submit_call_count == 0
 
 
 def test_retry_and_sqlite_reopen_return_the_same_single_pending_ticket(execution_database_path) -> None:

@@ -19,10 +19,12 @@ from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
     InstrumentRules,
+    OrderType,
     Position,
     ProductType,
     QuoteObservation,
     RuleObservation,
+    Side,
     TimeObservation,
 )
 from pa_agent.trading.domain.risk import (
@@ -69,12 +71,14 @@ class _EvidenceAndSubmissionGateway:
         fail_refresh: bool = False,
         account_position_sequence: tuple[tuple[Position, ...], ...] | None = None,
         quote_sequence: tuple[QuoteObservation, ...] | None = None,
+        balances: tuple[Balance, ...] | None = None,
     ) -> None:
         self.fail_refresh = fail_refresh
         self._account_position_sequence = (
             list(account_position_sequence) if account_position_sequence is not None else None
         )
         self._quote_sequence = list(quote_sequence) if quote_sequence is not None else None
+        self._balances = balances or (Balance("USDT", "2000", "1500", "0"),)
         self.call_order: list[str] = []
         self.outbound_submissions: list[OutboundSubmission] = []
 
@@ -102,7 +106,7 @@ class _EvidenceAndSubmissionGateway:
             account_id=account_id,
             product=product,
             observed_at=NOW,
-            balances=(Balance("USDT", "2000", "1500", "0"),),
+            balances=self._balances,
             positions=positions,
         )
 
@@ -157,7 +161,13 @@ def _row_counts(database_path: Path) -> dict[str, int]:
 
 
 def _issue_ticket(
-    database_path: Path, clock: _Clock, gateway: _EvidenceAndSubmissionGateway
+    database_path: Path,
+    clock: _Clock,
+    gateway: _EvidenceAndSubmissionGateway,
+    *,
+    side: Side = Side.BUY,
+    order_type: OrderType = OrderType.LIMIT,
+    price: str | None = "8000",
 ) -> tuple[object, object, object]:
     ledger = SQLiteExecutionLedger(database_path, clock=clock)
     target = make_execution_target()
@@ -172,7 +182,9 @@ def _issue_ticket(
     )
     candidate = proposal.propose(
         make_source_analysis_snapshot(
-            recommendation=make_analysis_recommendation(price="8000", quantity="0.125")
+            recommendation=make_analysis_recommendation(
+                price=price, quantity="0.125", side=side, order_type=order_type
+            )
         ),
         target,
     )
@@ -230,6 +242,37 @@ def test_concurrent_current_ticket_consumption_returns_one_outbound_and_one_gate
     }
     assert len(gateway.outbound_submissions) == 1
     assert gateway.outbound_submissions[0].client_order_id == outbound.client_order_id
+
+
+@pytest.mark.parametrize("side", (Side.BUY, Side.SELL))
+def test_market_ticket_consumes_once_with_fresh_side_specific_evidence(
+    execution_database_path: Path, side: Side
+) -> None:
+    """MARKET candidates cross issuance and one fresh consumption boundary without a limit price."""
+    clock = _Clock(NOW)
+    balances = (Balance("USDT", "2000", "1500", "0"),)
+    if side is Side.SELL:
+        balances += (Balance("BTC", "1", "1", "0"),)
+    gateway = _EvidenceAndSubmissionGateway(balances=balances)
+    ticket, candidate, policy = _issue_ticket(
+        execution_database_path,
+        clock,
+        gateway,
+        side=side,
+        order_type=OrderType.MARKET,
+        price=None,
+    )
+    service = _consumer(execution_database_path, clock, gateway)
+    try:
+        outbound = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+    finally:
+        service.close()
+
+    assert candidate.price is None
+    assert outbound is not None
+    assert service._ledger.list_approval_tickets()[0].status.value == "consumed"
+    SubmissionCoordinator(ledger=service._ledger, gateway=gateway).submit(outbound)
+    assert len(gateway.outbound_submissions) == 1
 
 
 @pytest.mark.parametrize("mode", ["expired", "binding_changed", "refresh_failed"])

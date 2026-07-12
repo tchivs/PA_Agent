@@ -7,14 +7,17 @@ from decimal import Decimal
 import pytest
 
 from pa_agent.trading.application.risk_engine import RiskEngine
+from pa_agent.trading.application.intent_factory import IntentFactory
 from pa_agent.trading.domain.errors import DecimalValueError, RiskRejectionReason
 from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
     InstrumentRules,
+    OrderType,
     Position,
     ProductType,
     QuoteObservation,
+    Side,
     TimeObservation,
 )
 from pa_agent.trading.domain.risk import (
@@ -29,8 +32,10 @@ from pa_agent.trading.domain.risk import (
 )
 from tests.fixtures.execution_factories import (
     make_account_observation,
+    make_analysis_recommendation,
     make_candidate_execution_intent,
     make_execution_target,
+    make_source_analysis_snapshot,
 )
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -105,6 +110,101 @@ def test_risk_engine_accepts_matching_complete_evidence_and_binds_digests() -> N
     assert assessment.evidence_digest
     assert assessment.fee_estimate.amount == Decimal("1.000")
     assert assessment.fee_estimate.rate_version == "fees-v1"
+
+
+@pytest.mark.parametrize(
+    ("side", "execution_price"),
+    ((Side.BUY, Decimal("8000")), (Side.SELL, Decimal("7999.50"))),
+)
+def test_market_candidates_use_the_current_side_price_for_all_economics(
+    side: Side, execution_price: Decimal
+) -> None:
+    target = make_execution_target()
+    candidate = IntentFactory(utc_now=lambda: NOW).propose(
+        make_source_analysis_snapshot(
+            completed_at=NOW,
+            recommendation=make_analysis_recommendation(
+                side=side,
+                order_type=OrderType.MARKET,
+                quantity="0.125",
+                price=None,
+            ),
+        ),
+        target,
+    )
+    balances = (Balance("USDT", "2000", "1500", "0"),)
+    if side is Side.SELL:
+        balances += (Balance("BTC", "1", "1", "0"),)
+
+    assessment = RiskEngine().assess(
+        candidate,
+        target,
+        select_phase2_policy(target),
+        make_evidence_bundle(account=make_account_observation(balances=balances, positions=())),
+    )
+
+    assert candidate.price is None
+    assert assessment.accepted is True
+    assert assessment.fee_estimate is not None
+    assert assessment.fee_estimate.expected_quote_price == execution_price
+    assert assessment.fee_estimate.amount == Decimal("1.000") if side is Side.BUY else Decimal("0.9999375")
+    assert dict(assessment.metrics) == {
+        "order_notional": Decimal("1000.000") if side is Side.BUY else Decimal("999.93750"),
+        "expected_quote_price": execution_price,
+        "price_deviation": Decimal("0"),
+        "slippage": Decimal("0.50"),
+        "existing_exposure": Decimal("0"),
+        "projected_exposure": Decimal("1000.000") if side is Side.BUY else Decimal("999.93750"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("available_btc", "fee_currency", "accepted"),
+    (
+        ("0", "USDT", False),
+        ("0.124", "USDT", False),
+        ("0.125", "BTC", False),
+        ("0.125", "USDT", True),
+        ("0.1259999375", "BTC", True),
+    ),
+)
+def test_market_sell_requires_available_base_balance_including_base_fee(
+    available_btc: str, fee_currency: str, accepted: bool
+) -> None:
+    target = make_execution_target()
+    candidate = IntentFactory(utc_now=lambda: NOW).propose(
+        make_source_analysis_snapshot(
+            completed_at=NOW,
+            recommendation=make_analysis_recommendation(
+                side=Side.SELL, order_type=OrderType.MARKET, quantity="0.125", price=None
+            ),
+        ),
+        target,
+    )
+    evidence = make_evidence_bundle(
+        account=make_account_observation(
+            balances=(
+                Balance("USDT", "2000", "1500", "0"),
+                Balance("BTC", available_btc, available_btc, "0"),
+            ),
+            positions=(),
+        ),
+        fee_rate=FeeRateObservation(
+            target=target,
+            symbol="BTCUSDT",
+            quote_identifier="quote-001",
+            fee_currency=fee_currency,
+            rate="0.001",
+            rate_version="fees-v1",
+            observed_at=NOW,
+        ),
+    )
+
+    assessment = RiskEngine().assess(candidate, target, select_phase2_policy(target), evidence)
+
+    assert assessment.accepted is accepted
+    if not accepted:
+        assert RiskRejectionReason.INSUFFICIENT_AVAILABLE_BALANCE in assessment.reason_codes
 
 
 def test_phase2_policy_binds_fixed_total_exposure_in_its_digest_material() -> None:

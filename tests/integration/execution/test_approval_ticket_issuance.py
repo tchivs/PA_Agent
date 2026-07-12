@@ -1,6 +1,7 @@
 """Real-SQLite automatic pending-ticket issuance contracts."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -11,7 +12,7 @@ from pa_agent.trading.application.evidence_collector import FreshEvidenceCollect
 from pa_agent.trading.application.intent_factory import IntentFactory
 from pa_agent.trading.application.proposal import ProposalService
 from pa_agent.trading.application.risk_engine import RiskEngine
-from pa_agent.trading.domain.approval import ApprovalTicketStatus
+from pa_agent.trading.domain.approval import ApprovalTicketStatus, TicketTerminalEvent
 from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
@@ -38,7 +39,6 @@ from tests.fixtures.execution_factories import (
     make_source_analysis_snapshot,
 )
 from tests.fixtures.fake_exchange import ScriptedEvidenceGateway
-
 
 pytestmark = pytest.mark.integration
 
@@ -160,3 +160,63 @@ def test_rejected_assessment_creates_no_ticket(execution_database_path, accepted
     assert candidate is not None
     assert assessment.accepted is False
     assert tickets == ()
+
+
+@pytest.mark.parametrize(
+    ("event", "status"),
+    [
+        (TicketTerminalEvent.OPERATOR_REJECTED, ApprovalTicketStatus.REJECTED),
+        (TicketTerminalEvent.EXPIRED, ApprovalTicketStatus.EXPIRED),
+        (TicketTerminalEvent.BINDING_INVALIDATED, ApprovalTicketStatus.INVALIDATED),
+    ],
+)
+def test_each_terminal_ticket_event_is_durable_and_distinct(
+    execution_database_path, event: TicketTerminalEvent, status: ApprovalTicketStatus
+) -> None:
+    """D-12 retains the terminal reason, actor and binding snapshot after SQLite reopen."""
+    ledger = SQLiteExecutionLedger(execution_database_path)
+    candidate, assessment = _propose_and_assess(_service(ledger, _gateway()))
+    approval = ApprovalService(ledger=ledger, utc_now=lambda: NOW)
+    ticket = ledger.list_approval_tickets()[0]
+    if event is TicketTerminalEvent.OPERATOR_REJECTED:
+        terminal = approval.reject_ticket(ticket.ticket_id, "operator_declined")
+    elif event is TicketTerminalEvent.EXPIRED:
+        terminal = approval.expire_ticket(ticket.ticket_id, "ticket_ttl_elapsed")
+    else:
+        terminal = approval.invalidate_ticket(
+            ticket.ticket_id,
+            "quote_changed",
+            replace(ticket.binding, quote_digest="changed-quote"),
+        )
+    ledger.close()
+
+    assert candidate is not None
+    assert assessment.accepted is True
+    assert terminal.status is status
+    assert terminal.terminal_event is event
+
+    inspection = open_sqlite_connection(execution_database_path)
+    try:
+        events = inspection.execute(
+            "SELECT event_type, reason, actor_label FROM approval_ticket_events ORDER BY rowid"
+        ).fetchall()
+        assert events == [
+            ("issued", "persisted_accepted_proposal", "proposal_service"),
+            (
+                event.value,
+                "operator_declined"
+                if event is TicketTerminalEvent.OPERATOR_REJECTED
+                else "ticket_ttl_elapsed"
+                if event is TicketTerminalEvent.EXPIRED
+                else "quote_changed",
+                "operator" if event is TicketTerminalEvent.OPERATOR_REJECTED else "system",
+            ),
+        ]
+    finally:
+        inspection.close()
+
+    reopened = SQLiteExecutionLedger(execution_database_path)
+    persisted = reopened.list_approval_tickets()[0]
+    reopened.close()
+    assert persisted.status is status
+    assert persisted.terminal_event is event

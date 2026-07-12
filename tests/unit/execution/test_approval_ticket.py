@@ -15,8 +15,10 @@ from pa_agent.trading.domain.approval import (
     build_ticket_review,
 )
 from pa_agent.trading.domain.risk import FeeEstimate, select_phase2_policy
-from tests.fixtures.execution_factories import make_candidate_execution_intent, make_execution_target
-
+from tests.fixtures.execution_factories import (
+    make_candidate_execution_intent,
+    make_execution_target,
+)
 
 NOW = datetime(2026, 7, 12, 11, 0, tzinfo=UTC)
 

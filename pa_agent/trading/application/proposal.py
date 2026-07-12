@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 
+from pa_agent.trading.application.approval import ApprovalService
 from pa_agent.trading.application.evidence_collector import (
     EvidenceCollectionRejection,
     FreshEvidenceCollector,
@@ -29,11 +30,13 @@ class ProposalService:
         intent_factory: IntentFactory,
         evidence_collector: FreshEvidenceCollector,
         risk_engine: RiskEngine,
+        approval_service: ApprovalService | None = None,
     ) -> None:
         self._ledger = ledger
         self._intent_factory = intent_factory
         self._evidence_collector = evidence_collector
         self._risk_engine = risk_engine
+        self._approval_service = approval_service
 
     def propose(
         self, snapshot: SourceAnalysisSnapshot, target: ExecutionTarget
@@ -75,4 +78,6 @@ class ProposalService:
         self._ledger.record_evidence(candidate, evidence)
         assessment = self._risk_engine.assess(candidate, target, policy, evidence)
         self._ledger.record_risk_assessment(candidate, assessment)
+        if assessment.accepted and self._approval_service is not None:
+            self._approval_service.create_pending_ticket(candidate, assessment)
         return assessment

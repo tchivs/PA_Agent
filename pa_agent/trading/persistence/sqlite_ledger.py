@@ -6,14 +6,20 @@ import json
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from pa_agent.trading.domain.approval import (
+    ApprovalTicket,
+    ApprovalTicketStatus,
     CandidateExecutionIntent,
     ExecutionTarget,
     SourceAnalysisSnapshot,
+    TicketBinding,
+    TicketRiskResult,
+    TicketTerminalEvent,
 )
 from pa_agent.trading.domain.errors import (
     ConversionRejectionReason,
@@ -38,7 +44,7 @@ from pa_agent.trading.domain.models import (
     canonicalize,
     decimal_to_canonical,
 )
-from pa_agent.trading.domain.risk import EvidenceBundle, RiskAssessment
+from pa_agent.trading.domain.risk import EvidenceBundle, RiskAssessment, select_phase2_policy
 from pa_agent.trading.persistence.sqlite_connection import (
     LedgerStorageError,
     bootstrap_sqlite_connection,
@@ -721,6 +727,203 @@ class SQLiteExecutionLedger(ExecutionLedger):
             for row in rows
         )
 
+    def create_pending_ticket_if_absent(
+        self,
+        candidate: CandidateExecutionIntent,
+        assessment: RiskAssessment,
+        created_at: datetime,
+    ) -> ApprovalTicket:
+        """Create one ticket only after durable candidate, evidence, and acceptance checks."""
+        if type(candidate) is not CandidateExecutionIntent or type(assessment) is not RiskAssessment:
+            raise TypeError("ticket issuance requires canonical candidate and assessment values")
+        if not assessment.accepted or assessment.fee_estimate is None:
+            raise LedgerStorageError("only accepted assessments with fee evidence can issue tickets")
+        connection = self._require_connection()
+        with transaction(connection):
+            existing = self._load_ticket_for_binding(candidate, assessment)
+            if existing is not None:
+                return existing
+            candidate_row = connection.execute(
+                "SELECT candidate_json FROM proposal_candidates WHERE intent_digest = ?",
+                (candidate.intent_digest,),
+            ).fetchone()
+            evidence_row = connection.execute(
+                "SELECT evidence_json FROM proposal_evidence WHERE evidence_digest = ? AND intent_digest = ?",
+                (assessment.evidence_digest, candidate.intent_digest),
+            ).fetchone()
+            assessment_row = connection.execute(
+                """
+                SELECT assessment_json FROM proposal_risk_assessments
+                WHERE intent_digest = ? AND accepted = 1 AND policy_version = ?
+                  AND policy_digest = ? AND evidence_digest = ?
+                ORDER BY recorded_at_utc DESC, rowid DESC LIMIT 1
+                """,
+                (
+                    candidate.intent_digest,
+                    assessment.policy_version,
+                    assessment.policy_digest,
+                    assessment.evidence_digest,
+                ),
+            ).fetchone()
+            if candidate_row is None or evidence_row is None or assessment_row is None:
+                raise LedgerStorageError("ticket issuance requires persisted candidate, evidence, and acceptance")
+            if candidate_row[0] != _canonical_json(canonicalize(candidate)):
+                raise LedgerStorageError("ticket candidate does not match durable proposal facts")
+            if json.loads(assessment_row[0]) != canonicalize(assessment):
+                raise LedgerStorageError("ticket assessment does not match durable proposal facts")
+            binding = _ticket_binding_from_persisted_json(
+                candidate=candidate, evidence_json=evidence_row[0], assessment=assessment
+            )
+            ticket = ApprovalTicket.create(
+                ticket_id=_new_id("approval-ticket"), binding=binding, created_at=created_at
+            )
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO approval_tickets(
+                        ticket_id, intent_digest, policy_digest, evidence_digest, policy_version,
+                        binding_json, status, created_at_utc, expires_at_utc,
+                        terminal_event, terminal_reason, terminal_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                    """,
+                    (
+                        ticket.ticket_id,
+                        ticket.candidate_digest,
+                        ticket.policy_digest,
+                        ticket.evidence_digest,
+                        ticket.policy_version,
+                        _canonical_json(canonicalize(binding)),
+                        ticket.status.value,
+                        _timestamp_text(ticket.created_at),
+                        _timestamp_text(ticket.expires_at),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                existing = self._load_ticket_for_binding(candidate, assessment)
+                if existing is None:
+                    raise
+                return existing
+            self._append_approval_ticket_event(
+                ticket=ticket,
+                event_type="issued",
+                reason="persisted_accepted_proposal",
+                actor_label="proposal_service",
+                occurred_at=ticket.created_at,
+            )
+            return ticket
+
+    def list_approval_tickets(self) -> tuple[ApprovalTicket, ...]:
+        """Load review tickets without creating command or outbound authority."""
+        rows = self._require_connection().execute(
+            """
+            SELECT ticket_id, binding_json, status, created_at_utc, expires_at_utc,
+                   terminal_event, terminal_reason, terminal_at_utc
+            FROM approval_tickets ORDER BY created_at_utc, rowid
+            """
+        ).fetchall()
+        return tuple(_ticket_from_row(row) for row in rows)
+
+    def terminate_approval_ticket(
+        self,
+        ticket_id: str,
+        event: TicketTerminalEvent,
+        reason: str,
+        binding: TicketBinding | None = None,
+    ) -> ApprovalTicket:
+        """Append one terminal D-12 event and retain its immutable binding snapshot."""
+        if type(event) is not TicketTerminalEvent:
+            raise TypeError("ticket termination requires a canonical terminal event")
+        connection = self._require_connection()
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT ticket_id, binding_json, status, created_at_utc, expires_at_utc,
+                       terminal_event, terminal_reason, terminal_at_utc
+                FROM approval_tickets WHERE ticket_id = ?
+                """,
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise LedgerStorageError("approval ticket does not exist")
+            ticket = _ticket_from_row(row)
+            if event is TicketTerminalEvent.BINDING_INVALIDATED:
+                if binding is None or not ticket.requires_invalidation(binding):
+                    raise LedgerStorageError("invalidation requires a changed binding snapshot")
+            elif binding is not None:
+                raise LedgerStorageError("only invalidation accepts a supplied binding snapshot")
+            terminal = ticket.terminate(event=event, reason=reason, occurred_at=self.utc_now())
+            changed = connection.execute(
+                """
+                UPDATE approval_tickets
+                SET status = ?, terminal_event = ?, terminal_reason = ?, terminal_at_utc = ?
+                WHERE ticket_id = ? AND status = ?
+                """,
+                (
+                    terminal.status.value,
+                    event.value,
+                    reason,
+                    _timestamp_text(terminal.terminal_at),
+                    ticket_id,
+                    ApprovalTicketStatus.PENDING.value,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise LedgerStorageError("approval ticket is no longer pending")
+            self._append_approval_ticket_event(
+                ticket=terminal,
+                event_type=event.value,
+                reason=reason,
+                actor_label="operator" if event is TicketTerminalEvent.OPERATOR_REJECTED else "system",
+                occurred_at=terminal.terminal_at,
+                binding=binding,
+            )
+            return terminal
+
+    def _load_ticket_for_binding(
+        self, candidate: CandidateExecutionIntent, assessment: RiskAssessment
+    ) -> ApprovalTicket | None:
+        """Load the one durable ticket selected by candidate and accepted-assessment identity."""
+        row = self._require_connection().execute(
+            """
+            SELECT ticket_id, binding_json, status, created_at_utc, expires_at_utc,
+                   terminal_event, terminal_reason, terminal_at_utc
+            FROM approval_tickets
+            WHERE intent_digest = ? AND policy_digest = ? AND evidence_digest = ?
+            """,
+            (candidate.intent_digest, assessment.policy_digest, assessment.evidence_digest),
+        ).fetchone()
+        return None if row is None else _ticket_from_row(row)
+
+    def _append_approval_ticket_event(
+        self,
+        *,
+        ticket: ApprovalTicket,
+        event_type: str,
+        reason: str,
+        actor_label: str,
+        occurred_at: datetime | None,
+        binding: TicketBinding | None = None,
+    ) -> None:
+        """Append one immutable ticket event inside the active transaction."""
+        if occurred_at is None:
+            raise LedgerStorageError("ticket event timestamp is required")
+        self._require_connection().execute(
+            """
+            INSERT INTO approval_ticket_events(
+                event_id, ticket_id, event_type, reason, actor_label, binding_json, occurred_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("approval-ticket-event"),
+                ticket.ticket_id,
+                event_type,
+                reason,
+                actor_label,
+                _canonical_json(canonicalize(binding or ticket.binding)),
+                _timestamp_text(occurred_at),
+            ),
+        )
+
     def _record_proposal_source(
         self, snapshot: SourceAnalysisSnapshot, target: ExecutionTarget
     ) -> str:
@@ -1001,3 +1204,80 @@ def _timestamp_from_text(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise LedgerStorageError("stored audit timestamp is not timezone-aware")
     return parsed.astimezone(UTC)
+
+
+def _ticket_binding_from_persisted_json(
+    *, candidate: CandidateExecutionIntent, evidence_json: str, assessment: RiskAssessment
+) -> TicketBinding:
+    """Build ticket review facts from canonical persisted evidence and assessment data."""
+    try:
+        evidence = json.loads(evidence_json)
+        quote = evidence["quote"]
+        fee = assessment.fee_estimate
+        if fee is None:
+            raise ValueError("accepted assessment has no fee estimate")
+        policy = select_phase2_policy(candidate.target)
+        if policy.policy_digest != assessment.policy_digest or policy.policy_version != assessment.policy_version:
+            raise ValueError("stored assessment policy does not match the fixed target policy")
+        return TicketBinding.from_persisted_facts(
+            candidate=candidate,
+            policy=policy,
+            evidence_digest=assessment.evidence_digest,
+            quote_observed_at=_timestamp_from_text(quote["observed_at"]),
+            fee_estimate=fee,
+            risk_reason_codes=assessment.reason_codes,
+            risk_metrics=assessment.metrics,
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise LedgerStorageError("stored proposal facts cannot build an approval ticket") from exc
+
+
+def _ticket_from_row(row: tuple[object, ...]) -> ApprovalTicket:
+    """Restore a ticket projection exclusively from its durable canonical row."""
+    try:
+        binding_data = json.loads(str(row[1]))
+        risk_data = binding_data["risk_result"]
+        binding = TicketBinding(
+            candidate_digest=binding_data["candidate_digest"],
+            source_digest=binding_data["source_digest"],
+            command_digest=binding_data["command_digest"],
+            target_digest=binding_data["target_digest"],
+            policy_version=binding_data["policy_version"],
+            policy_digest=binding_data["policy_digest"],
+            evidence_digest=binding_data["evidence_digest"],
+            quote_digest=binding_data["quote_digest"],
+            fee_rate_digest=binding_data["fee_rate_digest"],
+            data_age_digest=binding_data["data_age_digest"],
+            venue=binding_data["venue"],
+            environment=binding_data["environment"],
+            account_id=binding_data["account_id"],
+            product=binding_data["product"],
+            symbol=binding_data["symbol"],
+            side=binding_data["side"],
+            amount=Decimal(binding_data["amount"]),
+            expected_price=Decimal(binding_data["expected_price"]),
+            slippage=Decimal(binding_data["slippage"]),
+            estimated_fee=Decimal(binding_data["estimated_fee"]),
+            fee_currency=binding_data["fee_currency"],
+            fee_rate_version=binding_data["fee_rate_version"],
+            quote_identifier=binding_data["quote_identifier"],
+            data_observed_at=_timestamp_from_text(binding_data["data_observed_at"]),
+            source_provenance=dict(binding_data["source_provenance"]),
+            risk_result=TicketRiskResult(
+                accepted=bool(risk_data["accepted"]),
+                reason_codes=tuple(risk_data["reason_codes"]),
+                metrics=tuple((name, Decimal(value)) for name, value in risk_data["metrics"]),
+            ),
+        )
+        return ApprovalTicket(
+            ticket_id=str(row[0]),
+            binding=binding,
+            status=ApprovalTicketStatus(str(row[2])),
+            created_at=_timestamp_from_text(str(row[3])),
+            expires_at=_timestamp_from_text(str(row[4])),
+            terminal_event=TicketTerminalEvent(str(row[5])) if row[5] is not None else None,
+            terminal_reason=str(row[6]) if row[6] is not None else None,
+            terminal_at=_timestamp_from_text(str(row[7])) if row[7] is not None else None,
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise LedgerStorageError("stored approval ticket is invalid") from exc

@@ -231,7 +231,47 @@ _PROPOSAL_AUDIT_SCHEMA_STATEMENTS = (
 )
 
 
+def _create_approval_ticket_schema(connection: sqlite3.Connection) -> None:
+    """Create durable review tickets and their append-only terminal event history."""
+    for statement in _APPROVAL_TICKET_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+
+
+_APPROVAL_TICKET_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE approval_tickets (
+        ticket_id TEXT PRIMARY KEY,
+        intent_digest TEXT NOT NULL REFERENCES proposal_candidates(intent_digest),
+        policy_digest TEXT NOT NULL,
+        evidence_digest TEXT NOT NULL REFERENCES proposal_evidence(evidence_digest),
+        policy_version TEXT NOT NULL,
+        binding_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        terminal_event TEXT,
+        terminal_reason TEXT,
+        terminal_at_utc TEXT,
+        UNIQUE(intent_digest, policy_digest, evidence_digest)
+    )
+    """,
+    """
+    CREATE TABLE approval_ticket_events (
+        event_id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL REFERENCES approval_tickets(ticket_id),
+        event_type TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        actor_label TEXT NOT NULL,
+        binding_json TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX approval_ticket_events_ticket_idx ON approval_ticket_events(ticket_id, occurred_at_utc)",
+)
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
+    Migration(3, _create_approval_ticket_schema),
 )

@@ -6,9 +6,12 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from pa_agent.trading.domain.approval import (
+    ApprovalTicket,
     CandidateExecutionIntent,
     ExecutionTarget,
     SourceAnalysisSnapshot,
+    TicketBinding,
+    TicketTerminalEvent,
 )
 from pa_agent.trading.domain.errors import ConversionRejectionReason
 from pa_agent.trading.domain.models import (
@@ -184,6 +187,26 @@ class ExecutionLedger(Protocol):
 
     def list_proposal_audit_facts(self) -> tuple[ProposalAuditFact, ...]:
         """Return pre-ticket controlled audit facts in their durable recorded order."""
+
+    def create_pending_ticket_if_absent(
+        self,
+        candidate: CandidateExecutionIntent,
+        assessment: RiskAssessment,
+        created_at: datetime,
+    ) -> ApprovalTicket:
+        """Create or load one pending ticket after verifying durable accepted proposal facts."""
+
+    def list_approval_tickets(self) -> tuple[ApprovalTicket, ...]:
+        """Return durable approval tickets without granting consumption authority."""
+
+    def terminate_approval_ticket(
+        self,
+        ticket_id: str,
+        event: TicketTerminalEvent,
+        reason: str,
+        binding: TicketBinding | None = None,
+    ) -> ApprovalTicket:
+        """Append one distinct terminal ticket event using the persisted immutable binding."""
 
 
     def mark_submission_ambiguous(

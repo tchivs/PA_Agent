@@ -203,20 +203,74 @@ def test_proposal_service_and_sqlite_audit_do_not_persist_injected_secret_materi
     _assert_no_secret(repr(rows))
 
 
-def test_masking_formatter_redacts_registered_values_and_exception_text() -> None:
-    """Configured root-format output cannot retain sensitive message or exception data."""
-    _register_synthetic_credentials()
-    formatter = MaskingFormatter("%(message)s", api_key=API_KEY)
-    record = logging.LogRecord(
-        "secret-test", logging.ERROR, __file__, 1,
-        "failure %s %s %s %s", (API_SECRET, PASSPHRASE, SIGNATURE, QUERY_SECRET), None,
-    )
-    record.exc_info = (RuntimeError, RuntimeError(f"{AUTHORIZATION} {EXCEPTION_SECRET}"), None)
+@pytest.mark.parametrize("exc_info_shape", ("true", "exception", "tuple"))
+def test_masking_formatter_redacts_shared_records_before_file_output(
+    tmp_path: Path, exc_info_shape: str
+) -> None:
+    """A protected file handler cannot inherit another formatter's raw exception text."""
+    authorization = f"Bearer unregistered-authorization-{exc_info_shape}"
+    signature = f"unregistered-signature-{exc_info_shape}"
+    exception_secret = f"bare-unregistered-exception-{exc_info_shape}"
+    source_logger = logging.getLogger(f"secret-source-{exc_info_shape}")
+    protected_logger = logging.getLogger(f"secret-protected-{exc_info_shape}")
+    source_logger.handlers.clear()
+    protected_logger.handlers.clear()
+    source_logger.propagate = False
+    protected_logger.propagate = False
+    captured: list[logging.LogRecord] = []
 
-    rendered = formatter.format(record)
+    class CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
 
-    _assert_no_secret(rendered)
-    assert REDACTION_TOKEN in rendered
+    source_logger.addHandler(CaptureHandler())
+    log_path = tmp_path / f"protected-{exc_info_shape}.log"
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(MaskingFormatter("%(message)s"))
+    protected_logger.addHandler(file_handler)
+
+    try:
+        try:
+            raise RuntimeError(exception_secret)
+        except RuntimeError as error:
+            exc_info: object
+            if exc_info_shape == "true":
+                exc_info = True
+            elif exc_info_shape == "exception":
+                exc_info = error
+            else:
+                exc_info = (type(error), error, error.__traceback__)
+            source_logger.error(
+                "visible=%(visible)s headers=%(headers)r payload=%(payload)r",
+                {
+                    "visible": "safe-visible-field",
+                    "headers": {"authorization": authorization},
+                    "payload": [{"signature": signature}],
+                },
+                exc_info=exc_info,
+            )
+
+        assert len(captured) == 1
+        shared_record = captured[0]
+        ordinary_rendered = logging.Formatter("%(message)s").format(shared_record)
+        assert exception_secret in ordinary_rendered
+        assert exception_secret in (shared_record.exc_text or "")
+
+        protected_logger.handle(shared_record)
+    finally:
+        file_handler.flush()
+        file_handler.close()
+        source_logger.handlers.clear()
+        protected_logger.handlers.clear()
+
+    persisted = log_path.read_text(encoding="utf-8")
+
+    for secret in (authorization, signature, exception_secret):
+        assert secret not in persisted
+    assert REDACTION_TOKEN in persisted
+    assert "RuntimeError" in persisted
+    assert "logging_exception_redacted" in persisted
+    assert "safe-visible-field" in persisted
 
 
 def _analysis_record() -> AnalysisRecord:

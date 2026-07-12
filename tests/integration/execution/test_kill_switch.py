@@ -12,6 +12,7 @@ import pytest
 from pa_agent.trading.application.kill_switch import KillSwitchService
 from pa_agent.trading.application.recovery import RecoveryService
 from pa_agent.trading.application.recovery_assessment import RecoveryAssessmentService
+from pa_agent.trading.application.zero_scope_clearance import ZeroScopeClearanceCollector
 from pa_agent.trading.domain.approval import (
     KillSwitchStatus,
     RecoveryAssessment,
@@ -66,6 +67,7 @@ class _CancellationGateway(ReconciliationOnlyGateway):
     def __init__(self, evidence_by_client_id: dict[str, GatewayEvidence | None]) -> None:
         super().__init__(evidence_by_client_id)
         self.cancelled_client_ids: list[str] = []
+        self.actual_open_orders: tuple[object, ...] = ()
 
     def cancel_order(self, client_order_id: str) -> GatewayEvidence:
         self.cancelled_client_ids.append(client_order_id)
@@ -86,7 +88,7 @@ class _CancellationGateway(ReconciliationOnlyGateway):
 
     def list_open_orders(self, account_id: str, product: ProductType) -> tuple[object, ...]:
         del account_id, product
-        return ()
+        return self.actual_open_orders
 
     def get_instrument_rules(self, symbol: str) -> RuleObservation:
         return RuleObservation(InstrumentRules(symbol, "0.50", "0.001", "0.001", "10"), NOW)
@@ -546,6 +548,71 @@ def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
         reopened.close()
 
 
+def test_zero_scope_recovery_rejects_caller_proofs_and_real_gateway_open_orders(
+    execution_database_path: Path,
+) -> None:
+    """Only a ledger-owned collector may clear an empty scope from real gateway facts."""
+    clock = _Clock()
+    gateway = _CancellationGateway({})
+    collector = ZeroScopeClearanceCollector(gateway=gateway, utc_now=clock.utc_now)
+    forged_begin_proof = collector.collect()
+    assert forged_begin_proof is not None
+    forged_complete_proof = _fresh_zero_scope_proof(
+        forged_begin_proof, NOW + timedelta(seconds=1), "caller-built-challenge"
+    )
+    gateway.actual_open_orders = (object(),)
+    ledger = SQLiteExecutionLedger(
+        execution_database_path,
+        clock=clock,
+        zero_scope_clearance_collector=collector,
+    )
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        before = _zero_scope_transition_snapshot(execution_database_path)
+
+        with pytest.raises(TypeError):
+            ledger.begin_kill_switch_recovery(
+                "operator-1", assessment_ids=(), zero_scope_proof=forged_begin_proof
+            )
+        assert _zero_scope_transition_snapshot(execution_database_path) == before
+        assert service.begin_recovery("operator-1", assessment_ids=()) is False
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
+        assert _zero_scope_transition_snapshot(execution_database_path) == before
+        assert gateway.submit_call_count == 0
+
+        gateway.actual_open_orders = ()
+        assert service.begin_recovery("operator-1", assessment_ids=()) is True
+        after_begin = _zero_scope_transition_snapshot(execution_database_path)
+        with pytest.raises(TypeError):
+            ledger.complete_kill_switch_recovery(
+                "operator-1", assessment_ids=(), zero_scope_proof=forged_complete_proof
+            )
+        assert _zero_scope_transition_snapshot(execution_database_path) == after_begin
+    finally:
+        ledger.close()
+
+    clock.now = NOW + timedelta(seconds=1)
+    reopened = SQLiteExecutionLedger(
+        execution_database_path,
+        clock=clock,
+        zero_scope_clearance_collector=collector,
+    )
+    resumed = KillSwitchService(ledger=reopened, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        assert resumed.complete_recovery("operator-1", assessment_ids=()) is True
+        assert reopened.get_kill_switch_state().status is KillSwitchStatus.READY
+        completed = _zero_scope_transition_snapshot(execution_database_path)
+        assert completed["events"] == after_begin["events"] + 1
+        assert completed["pending"] == 0
+        assert completed["consumed"] == 1
+        assert reopened.count_recovery_assessments() == 0
+        assert completed["authorization"] == before["authorization"]
+        assert gateway.submit_call_count == 0
+    finally:
+        reopened.close()
+
+
 def test_zero_scope_begin_proof_cannot_complete_recovery_after_reopen(
     execution_database_path: Path,
 ) -> None:
@@ -564,9 +631,10 @@ def test_zero_scope_begin_proof_cannot_complete_recovery_after_reopen(
 
     reopened = SQLiteExecutionLedger(execution_database_path, clock=clock)
     try:
-        assert not reopened.complete_kill_switch_recovery(
-            "operator-1", assessment_ids=(), zero_scope_proof=saved_begin_proof
-        )
+        with pytest.raises(TypeError):
+            reopened.complete_kill_switch_recovery(
+                "operator-1", assessment_ids=(), zero_scope_proof=saved_begin_proof
+            )
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
         assert _zero_scope_transition_snapshot(execution_database_path) == baseline
         assert reopened.count_recovery_assessments() == 0
@@ -605,9 +673,10 @@ def test_zero_scope_persisted_transition_expiry_rejects_fresh_matching_proof(
         )
         baseline = _zero_scope_transition_snapshot(execution_database_path)
 
-        assert not ledger.complete_kill_switch_recovery(
-            "operator-1", assessment_ids=(), zero_scope_proof=fresh_matching_proof
-        )
+        with pytest.raises(TypeError):
+            ledger.complete_kill_switch_recovery(
+                "operator-1", assessment_ids=(), zero_scope_proof=fresh_matching_proof
+            )
         assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
         assert _zero_scope_transition_snapshot(execution_database_path) == baseline
         assert ledger.count_recovery_assessments() == 0
@@ -634,9 +703,10 @@ def test_zero_scope_transition_rejects_missing_or_forged_challenge_without_mutat
         forged_proof = _fresh_zero_scope_proof(begin_proof, clock.now, challenge)
         baseline = _zero_scope_transition_snapshot(execution_database_path)
 
-        assert not ledger.complete_kill_switch_recovery(
-            "operator-1", assessment_ids=(), zero_scope_proof=forged_proof
-        )
+        with pytest.raises(TypeError):
+            ledger.complete_kill_switch_recovery(
+                "operator-1", assessment_ids=(), zero_scope_proof=forged_proof
+            )
         assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
         assert _zero_scope_transition_snapshot(execution_database_path) == baseline
         assert ledger.count_recovery_assessments() == 0
@@ -660,15 +730,17 @@ def test_zero_scope_consumed_transition_cannot_write_a_second_ready_event(
         challenge = _pending_zero_scope_transition(execution_database_path)["transition_challenge"]
         clock.now = NOW + timedelta(seconds=1)
         complete_proof = _fresh_zero_scope_proof(begin_proof, clock.now, challenge)
-        assert ledger.complete_kill_switch_recovery(
-            "operator-1", assessment_ids=(), zero_scope_proof=complete_proof
-        )
+        with pytest.raises(TypeError):
+            ledger.complete_kill_switch_recovery(
+                "operator-1", assessment_ids=(), zero_scope_proof=complete_proof
+            )
         baseline = _zero_scope_transition_snapshot(execution_database_path)
 
-        assert not ledger.complete_kill_switch_recovery(
-            "operator-1", assessment_ids=(), zero_scope_proof=complete_proof
-        )
-        assert ledger.get_kill_switch_state().status is KillSwitchStatus.READY
+        with pytest.raises(TypeError):
+            ledger.complete_kill_switch_recovery(
+                "operator-1", assessment_ids=(), zero_scope_proof=complete_proof
+            )
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
         assert _zero_scope_transition_snapshot(execution_database_path) == baseline
         assert gateway.submit_call_count == 0
     finally:

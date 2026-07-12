@@ -201,22 +201,15 @@ class ExecutionLedger(Protocol):
         evidence: EvidenceBundle,
         assessment: RiskAssessment,
     ) -> OutboundDispatchPermit | None:
-        """Prepare one dispatch permit from a current ticket, not gateway authority.
-
-        This is contract preparation, not forged-input blocking. The future
-        ledger implementation must atomically mint and persist the opaque proof
-        during ticket consumption; only that future ledger implementation may
-        transform the permit into a gateway-facing value.
-        """
+        """Persist one expiring dispatch proof while atomically consuming a ticket."""
 
     def lease_outbound_submission(self, permit: OutboundDispatchPermit) -> OutboundSubmission:
         """Lease one gateway submission after one-time durable proof verification.
 
-        The future ledger implementation must verify the permit's persisted
-        identity and proof in one transaction, use a conditional rowcount check
-        to consume its one-time lease, then reconstruct the canonical command.
-        This contract alone does not block forged permits before that durable
-        implementation exists.
+        The ledger verifies the persisted identity and proof in one transaction,
+        uses a conditional rowcount check to consume its one-time lease, then
+        reconstructs the canonical command. Callers cannot turn a lookalike
+        permit into a gateway-facing value.
         """
 
     def mark_outbound_submission_ambiguous(self, outbound: OutboundSubmission) -> None:

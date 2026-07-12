@@ -313,9 +313,36 @@ _KILL_SWITCH_SCHEMA_STATEMENTS = (
 )
 
 
+def _create_outbound_dispatch_schema(connection: sqlite3.Connection) -> None:
+    """Create the one-way proof state consumed before the sole gateway call."""
+    for statement in _OUTBOUND_DISPATCH_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+
+
+_OUTBOUND_DISPATCH_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE outbound_dispatch_attempts (
+        command_id TEXT PRIMARY KEY REFERENCES order_commands(command_id),
+        client_order_id TEXT NOT NULL UNIQUE,
+        reconciliation_job_id TEXT NOT NULL UNIQUE REFERENCES reconciliation_jobs(job_id),
+        outbound_attempt_proof TEXT NOT NULL UNIQUE,
+        created_at_utc TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'leased', 'expired')),
+        leased_at_utc TEXT
+    )
+    """,
+    "CREATE INDEX outbound_dispatch_attempts_lease_idx "
+    "ON outbound_dispatch_attempts(command_id, client_order_id, reconciliation_job_id, status)",
+    "CREATE INDEX outbound_dispatch_attempts_expiry_idx "
+    "ON outbound_dispatch_attempts(status, expires_at_utc)",
+)
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
     Migration(3, _create_approval_ticket_schema),
     Migration(4, _create_kill_switch_schema),
+    Migration(5, _create_outbound_dispatch_schema),
 )

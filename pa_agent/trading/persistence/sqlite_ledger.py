@@ -64,6 +64,7 @@ from pa_agent.trading.persistence.sqlite_connection import (
 from pa_agent.trading.ports.clock import UtcClock
 from pa_agent.trading.ports.ledger import (
     ExecutionLedger,
+    OutboundDispatchPermit,
     OutboundSubmission,
     ProposalAuditFact,
     ReconciliationJob,
@@ -251,8 +252,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
         policy: object,
         evidence: EvidenceBundle,
         assessment: RiskAssessment,
-    ) -> OutboundSubmission | None:
-        """Consume a re-evidenced ticket and start outbound authority in one transaction."""
+    ) -> OutboundDispatchPermit | None:
+        """Consume a re-evidenced ticket and persist one pending dispatch proof."""
         if (
             type(candidate) is not CandidateExecutionIntent
             or type(policy) is not RiskPolicy
@@ -338,6 +339,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
             submitting = assert_transition(OrderState.PROPOSED, LifecycleEvent.SUBMIT_REQUESTED)
             job_id = _new_id("reconciliation")
             claim_token = _new_id("claim-token")
+            proof = _new_id("dispatch-proof")
             connection.execute(
                 """
                 INSERT INTO order_commands(
@@ -389,13 +391,113 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 """,
                 (_new_id("claim"), command.command_id, claim_token, now, "outbound_started"),
             )
+            connection.execute(
+                """
+                INSERT INTO outbound_dispatch_attempts(
+                    command_id, client_order_id, reconciliation_job_id, outbound_attempt_proof,
+                    created_at_utc, expires_at_utc, status, leased_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    command.command_id,
+                    client_order_id,
+                    job_id,
+                    proof,
+                    now,
+                    _timestamp_text(ticket.expires_at),
+                    "pending",
+                ),
+            )
             self._inject_failure("before_ticket_consumption")
-            return OutboundSubmission(
-                command=command,
+            return OutboundDispatchPermit(
                 command_id=command.command_id,
                 client_order_id=client_order_id,
                 reconciliation_job_id=job_id,
-                outbound_attempt_token=_new_id("outbound-attempt"),
+                outbound_attempt_proof=proof,
+            )
+
+    def lease_outbound_submission(self, permit: OutboundDispatchPermit) -> OutboundSubmission:
+        """Atomically lease one persisted proof and rebuild the canonical command."""
+        if type(permit) is not OutboundDispatchPermit:
+            raise TypeError("outbound lease requires a dispatch permit")
+        connection = self._require_connection()
+        now = _timestamp_text(self.utc_now())
+        with transaction(connection):
+            self._require_ready_in_transaction()
+            row = connection.execute(
+                """
+                SELECT commands.command_json, commands.client_order_id, jobs.job_id,
+                       orders.lifecycle_state, claims.status, attempts.expires_at_utc, attempts.status
+                FROM outbound_dispatch_attempts AS attempts
+                JOIN order_commands AS commands ON commands.command_id = attempts.command_id
+                JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
+                JOIN orders ON orders.command_id = commands.command_id
+                JOIN submission_claims AS claims ON claims.command_id = commands.command_id
+                WHERE attempts.command_id = ?
+                  AND attempts.client_order_id = ?
+                  AND attempts.reconciliation_job_id = ?
+                  AND attempts.outbound_attempt_proof = ?
+                """,
+                (
+                    permit.command_id,
+                    permit.client_order_id,
+                    permit.reconciliation_job_id,
+                    permit.outbound_attempt_proof,
+                ),
+            ).fetchone()
+            if row is None:
+                raise LedgerStorageError("dispatch permit does not match durable proof")
+            if row[6] != "pending":
+                raise LedgerStorageError("dispatch proof is no longer pending")
+            if row[5] <= now:
+                expired = connection.execute(
+                    """
+                    UPDATE outbound_dispatch_attempts SET status = ?
+                    WHERE command_id = ? AND client_order_id = ? AND reconciliation_job_id = ?
+                      AND outbound_attempt_proof = ? AND status = ?
+                    """,
+                    (
+                        "expired",
+                        permit.command_id,
+                        permit.client_order_id,
+                        permit.reconciliation_job_id,
+                        permit.outbound_attempt_proof,
+                        "pending",
+                    ),
+                )
+                if expired.rowcount != 1:
+                    raise LedgerStorageError("dispatch proof could not be expired")
+                raise LedgerStorageError("dispatch proof has expired")
+            if row[3] != OrderState.SUBMITTING.value or row[4] != "outbound_started":
+                raise LedgerStorageError("dispatch proof is not backed by durable outbound state")
+            leased = connection.execute(
+                """
+                UPDATE outbound_dispatch_attempts SET status = ?, leased_at_utc = ?
+                WHERE command_id = ? AND client_order_id = ? AND reconciliation_job_id = ?
+                  AND outbound_attempt_proof = ? AND status = ? AND expires_at_utc > ?
+                """,
+                (
+                    "leased",
+                    now,
+                    permit.command_id,
+                    permit.client_order_id,
+                    permit.reconciliation_job_id,
+                    permit.outbound_attempt_proof,
+                    "pending",
+                    now,
+                ),
+            )
+            if leased.rowcount != 1:
+                raise LedgerStorageError("dispatch proof could not be leased")
+            command = _command_from_canonical_json(row[0])
+            if command.command_id != permit.command_id or command.client_order_id != row[1]:
+                raise LedgerStorageError("durable command identity does not match dispatch proof")
+            return OutboundSubmission(
+                command=command,
+                command_id=permit.command_id,
+                client_order_id=row[1],
+                reconciliation_job_id=row[2],
+                outbound_attempt_token=permit.outbound_attempt_proof,
             )
 
     def mark_submission_ambiguous(

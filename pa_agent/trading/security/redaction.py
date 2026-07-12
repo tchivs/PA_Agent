@@ -21,6 +21,15 @@ _SENSITIVE_QUERY_PATTERN = re.compile(
     r"([?&](?:api[_-]?key|authorization|credential|passphrase|password|secret|signature|token)=)[^&#\s]+",
     re.IGNORECASE,
 )
+_SENSITIVE_TEXT_PATTERN = re.compile(
+    r"""(?ix)
+    (?P<prefix>
+        ["']?(?:api[_-]?key|authorization|credential|passphrase|password|secret|signature|token)["']?
+        \s*[:=]\s*
+    )
+    (?:'[^']*'|"[^"]*"|[^,}\]\n]+)
+    """
+)
 
 _OUTPUT_REDACTOR = None
 
@@ -62,7 +71,8 @@ class SecretRedactor:
         redacted = value
         for secret in self._values:
             redacted = redacted.replace(secret, REDACTION_TOKEN)
-        return _SENSITIVE_QUERY_PATTERN.sub(r"\1" + REDACTION_TOKEN, redacted)
+        redacted = _SENSITIVE_QUERY_PATTERN.sub(r"\1" + REDACTION_TOKEN, redacted)
+        return _SENSITIVE_TEXT_PATTERN.sub(r"\g<prefix>" + REDACTION_TOKEN, redacted)
 
 
 def output_redactor() -> SecretRedactor:

@@ -8,9 +8,12 @@ verify_logging_handlers() -> bool
 """
 from __future__ import annotations
 
+import copy
 import logging
 import logging.handlers
 from pathlib import Path
+from types import TracebackType
+from typing import Any
 
 from pa_agent.config.paths import LOG_FILE_PATH
 from pa_agent.trading.security.redaction import output_redactor
@@ -19,6 +22,7 @@ from pa_agent.trading.security.redaction import output_redactor
 
 _active_formatters: list[MaskingFormatter] = []
 _configured: bool = False
+_LOGGING_EXCEPTION_REASON = "logging_exception_redacted"
 
 # ── MaskingFormatter ──────────────────────────────────────────────────────────
 
@@ -32,14 +36,43 @@ class MaskingFormatter(logging.Formatter):
         if api_key:
             output_redactor().register(api_key)
 
-    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
-        message = super().format(record)
+    def format(self, record: logging.LogRecord) -> str:
+        safe_record = copy.copy(record)
+        redactor = output_redactor()
+        safe_record.msg = redactor.redact(record.msg)
+        safe_record.args = redactor.redact(record.args)
+        safe_record.__dict__.pop("message", None)
+        safe_record.exc_text = None
+        safe_record.exc_info = _safe_exc_info(record.exc_info)
+        message = super().format(safe_record)
         return output_redactor().redact(message)
 
     def set_api_key(self, new_key: str) -> None:
         self._api_key = new_key
         if new_key:
             output_redactor().register(new_key)
+
+
+def _safe_exc_info(exc_info: Any) -> tuple[type[BaseException], BaseException, TracebackType | None] | None:
+    """Detach untrusted exceptions while retaining a controlled standard traceback shape."""
+    if not exc_info:
+        return None
+
+    exception_type: type[BaseException] = Exception
+    traceback: TracebackType | None = None
+    if isinstance(exc_info, tuple) and len(exc_info) == 3:
+        candidate_type, _candidate_value, candidate_traceback = exc_info
+        if isinstance(candidate_type, type) and issubclass(candidate_type, BaseException):
+            exception_type = candidate_type
+        if isinstance(candidate_traceback, TracebackType):
+            traceback = candidate_traceback
+    elif isinstance(exc_info, BaseException):
+        exception_type = type(exc_info)
+        traceback = exc_info.__traceback__
+
+    safe_type = type(exception_type.__name__, (Exception,), {})
+    safe_exception = safe_type(f"{_LOGGING_EXCEPTION_REASON} {output_redactor().redact('[REDACTED]')}")
+    return safe_type, safe_exception, traceback
 
 
 # ── Public functions ──────────────────────────────────────────────────────────
@@ -79,7 +112,7 @@ def configure_logging(api_key: str = "") -> None:
 
     If handlers were removed after a prior configure_logging call, re-attaches them.
     """
-    global _configured  # noqa: PLW0603
+    global _configured
 
     if _configured:
         if api_key:

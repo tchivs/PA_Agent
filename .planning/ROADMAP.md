@@ -83,7 +83,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/application/intent_factory.py`, `risk_engine.py`, `execution_coordinator.py`, `reconciler.py`, `security/`; extend non-secret settings through `pa_agent/config/settings.py`; integrate from `pa_agent/app_context.py` without adding execution behavior to `pa_agent/gui/main_window.py`, `pa_agent/gui/order_opportunity.py`, or `pa_agent/notify/`.
 **Key risks and gates**: The existing Stage 2 payload and alert pipeline must never receive a submission capability. Product context carries leverage, borrow/repay, margin mode, and position mode; leverage is not a generic order field. Fresh exchange evidence is mandatory before submit, and failed evidence rejects rather than using cached values.
-**Plans**: 9/12 plans executed
+**Plans**: 10/12 plans executed
 
 Plans:
 **Wave 1**
@@ -118,7 +118,7 @@ Plans:
 **Gap Closure Plans**
 
 - [x] 02-09-PLAN.md — Reject stale source-analysis snapshots before candidate creation and persist the controlled rejection.
-- [ ] 02-10-PLAN.md — Enforce the fixed selected-target Paper Spot total-exposure policy in the pure risk engine.
+- [x] 02-10-PLAN.md — Enforce the fixed selected-target Paper Spot total-exposure policy in the pure risk engine.
 - [ ] 02-11-PLAN.md — Prove excess exposure cannot issue or consume an approval ticket.
 - [ ] 02-12-PLAN.md — Block accepted-risk persistence while the durable kill switch is not READY, including after restart.
 
@@ -239,7 +239,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Execution Foundation | 8/8 | Complete | 2026-07-11 |
-| 2. Approval And Risk Boundary | 9/12 | In Progress|  |
+| 2. Approval And Risk Boundary | 10/12 | In Progress|  |
 | 3. Paper Product Core | 0/TBD | Not started | - |
 | 4. Local Trading Workspace | 0/TBD | Not started | - |
 | 5. Binance Spot Testnet | 0/TBD | Not started | - |

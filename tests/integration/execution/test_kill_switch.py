@@ -1,10 +1,10 @@
 """Real-SQLite coverage for the durable approval kill-switch boundary."""
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-import json
 from pathlib import Path
 
 import pytest

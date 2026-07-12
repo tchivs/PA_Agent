@@ -52,6 +52,7 @@ from pa_agent.trading.domain.models import (
     canonicalize,
     decimal_to_canonical,
 )
+from pa_agent.trading.domain.recovery_evidence import RecoveryEvidence
 from pa_agent.trading.domain.risk import (
     EvidenceBundle,
     RiskAssessment,
@@ -1286,8 +1287,16 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 or not assessment.accepted
                 or assessment.reason_codes
                 or not _is_recovery_timestamp_fresh(assessment.observed_at, self.utc_now())
-                or not self._recovery_evidence_is_complete(assessment.evidence_json, assessment.evidence_digest)
             ):
+                return None
+            try:
+                RecoveryEvidence.from_canonical_json(
+                    assessment.evidence_json,
+                    assessment.evidence_digest,
+                    durable_scope,
+                    self.utc_now(),
+                )
+            except ValueError:
                 return None
             assessment_id = _new_id("recovery-assessment")
             connection.execute(

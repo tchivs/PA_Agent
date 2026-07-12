@@ -115,6 +115,19 @@ class _CancellationGateway(ReconciliationOnlyGateway):
         return FeeRateObservation(target, symbol, quote_identifier, "USDT", "0.001", "fees-v1", NOW)
 
 
+def _zero_scope_ledger(
+    database_path: Path, clock: _Clock, gateway: _CancellationGateway
+) -> SQLiteExecutionLedger:
+    """Compose the ledger with its immutable, gateway-owned zero-scope reader."""
+    return SQLiteExecutionLedger(
+        database_path,
+        clock=clock,
+        zero_scope_clearance_collector=ZeroScopeClearanceCollector(
+            gateway=gateway, utc_now=clock.utc_now
+        ),
+    )
+
+
 def _create_open_order(ledger: SQLiteExecutionLedger) -> str:
     database_path = Path(ledger._require_connection().execute("PRAGMA database_list").fetchone()[2])
     clock = _Clock()
@@ -487,8 +500,8 @@ def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
 ) -> None:
     """A no-order latch may recover only through two fresh ID-free proof events."""
     clock = _Clock()
-    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     gateway = _CancellationGateway({})
+    ledger = _zero_scope_ledger(execution_database_path, clock, gateway)
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
 
     try:
@@ -500,7 +513,7 @@ def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
     finally:
         ledger.close()
 
-    reopened = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    reopened = _zero_scope_ledger(execution_database_path, clock, gateway)
     clock.now = NOW + timedelta(seconds=1)
     resumed = KillSwitchService(ledger=reopened, gateway=gateway, utc_now=clock.utc_now)
     try:
@@ -569,6 +582,7 @@ def test_zero_scope_recovery_rejects_caller_proofs_and_real_gateway_open_orders(
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
     try:
         service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        assert not hasattr(ledger, "get_pending_zero_scope_recovery_challenge")
         before = _zero_scope_transition_snapshot(execution_database_path)
 
         with pytest.raises(TypeError):
@@ -589,6 +603,10 @@ def test_zero_scope_recovery_rejects_caller_proofs_and_real_gateway_open_orders(
                 "operator-1", assessment_ids=(), zero_scope_proof=forged_complete_proof
             )
         assert _zero_scope_transition_snapshot(execution_database_path) == after_begin
+        gateway.actual_open_orders = (object(),)
+        assert service.complete_recovery("operator-1", assessment_ids=()) is False
+        assert _zero_scope_transition_snapshot(execution_database_path) == after_begin
+        gateway.actual_open_orders = ()
     finally:
         ledger.close()
 
@@ -613,13 +631,32 @@ def test_zero_scope_recovery_rejects_caller_proofs_and_real_gateway_open_orders(
         reopened.close()
 
 
+def test_zero_scope_recovery_without_constructor_collector_fails_closed(
+    execution_database_path: Path,
+) -> None:
+    """An unconfigured ledger must not fall back to a caller- or service-held proof."""
+    clock = _Clock()
+    gateway = _CancellationGateway({})
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        baseline = _zero_scope_transition_snapshot(execution_database_path)
+        assert service.begin_recovery("operator-1", assessment_ids=()) is False
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
+        assert _zero_scope_transition_snapshot(execution_database_path) == baseline
+        assert gateway.submit_call_count == 0
+    finally:
+        ledger.close()
+
+
 def test_zero_scope_begin_proof_cannot_complete_recovery_after_reopen(
     execution_database_path: Path,
 ) -> None:
     """A persisted transition rejects a caller replaying the saved begin proof."""
     clock = _Clock()
-    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     gateway = _CancellationGateway({})
+    ledger = _zero_scope_ledger(execution_database_path, clock, gateway)
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
     try:
         service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
@@ -629,7 +666,7 @@ def test_zero_scope_begin_proof_cannot_complete_recovery_after_reopen(
     finally:
         ledger.close()
 
-    reopened = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    reopened = _zero_scope_ledger(execution_database_path, clock, gateway)
     try:
         with pytest.raises(TypeError):
             reopened.complete_kill_switch_recovery(
@@ -659,8 +696,8 @@ def test_zero_scope_persisted_transition_expiry_rejects_fresh_matching_proof(
 ) -> None:
     """Durable challenge expiry fails before any transition or authority mutation."""
     clock = _Clock()
-    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     gateway = _CancellationGateway({})
+    ledger = _zero_scope_ledger(execution_database_path, clock, gateway)
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
     try:
         service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
@@ -677,6 +714,7 @@ def test_zero_scope_persisted_transition_expiry_rejects_fresh_matching_proof(
             ledger.complete_kill_switch_recovery(
                 "operator-1", assessment_ids=(), zero_scope_proof=fresh_matching_proof
             )
+        assert service.complete_recovery("operator-1", assessment_ids=()) is False
         assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
         assert _zero_scope_transition_snapshot(execution_database_path) == baseline
         assert ledger.count_recovery_assessments() == 0
@@ -692,8 +730,8 @@ def test_zero_scope_transition_rejects_missing_or_forged_challenge_without_mutat
 ) -> None:
     """A canonical fresh proof cannot replace the durable one-time binding."""
     clock = _Clock()
-    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     gateway = _CancellationGateway({})
+    ledger = _zero_scope_ledger(execution_database_path, clock, gateway)
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
     try:
         service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
@@ -720,8 +758,8 @@ def test_zero_scope_consumed_transition_cannot_write_a_second_ready_event(
 ) -> None:
     """The conditional consumption makes even a valid proof single-use."""
     clock = _Clock()
-    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     gateway = _CancellationGateway({})
+    ledger = _zero_scope_ledger(execution_database_path, clock, gateway)
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
     try:
         service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
@@ -734,13 +772,11 @@ def test_zero_scope_consumed_transition_cannot_write_a_second_ready_event(
             ledger.complete_kill_switch_recovery(
                 "operator-1", assessment_ids=(), zero_scope_proof=complete_proof
             )
+        assert service.complete_recovery("operator-1", assessment_ids=()) is True
         baseline = _zero_scope_transition_snapshot(execution_database_path)
 
-        with pytest.raises(TypeError):
-            ledger.complete_kill_switch_recovery(
-                "operator-1", assessment_ids=(), zero_scope_proof=complete_proof
-            )
-        assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
+        assert service.complete_recovery("operator-1", assessment_ids=()) is False
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.READY
         assert _zero_scope_transition_snapshot(execution_database_path) == baseline
         assert gateway.submit_call_count == 0
     finally:
@@ -793,8 +829,8 @@ def test_zero_scope_invalid_current_facts_preserve_latched_state(
 ) -> None:
     """Every unavailable, stale, mismatched, or exposed fact fails before a state event."""
     clock = _Clock()
-    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     gateway = _CancellationGateway({})
+    ledger = _zero_scope_ledger(execution_database_path, clock, gateway)
     mutation(gateway)
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
     try:
@@ -814,8 +850,8 @@ def test_zero_scope_unresolved_local_claim_preserves_latched_state(
 ) -> None:
     """An empty active scope cannot bypass a concurrent unresolved local claim."""
     clock = _Clock()
-    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
     gateway = _CancellationGateway({})
+    ledger = _zero_scope_ledger(execution_database_path, clock, gateway)
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
     try:
         service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")

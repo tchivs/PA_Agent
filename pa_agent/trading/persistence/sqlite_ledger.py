@@ -13,6 +13,7 @@ from secrets import token_urlsafe
 from typing import Any
 from uuid import uuid4
 
+from pa_agent.trading.application.zero_scope_clearance import ZeroScopeClearanceCollector
 from pa_agent.trading.domain.approval import (
     ApprovalTicket,
     ApprovalTicketStatus,
@@ -83,7 +84,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
 
     This repository persists the command, lifecycle event, projection,
     reconciliation job, and submission claim in one SQLite transaction before a
-    future gateway can cause a remote side effect. It owns no gateway transport.
+    future gateway can cause a remote side effect. A zero-scope recovery
+    collector may be injected only at construction; without it, empty-scope
+    recovery fails closed rather than accepting caller-provided gateway facts.
     """
 
     def __init__(
@@ -93,11 +96,13 @@ class SQLiteExecutionLedger(ExecutionLedger):
         clock: UtcClock | None = None,
         failure_injector: Callable[[str], None] | None = None,
         redactor: SecretRedactor | None = None,
+        zero_scope_clearance_collector: ZeroScopeClearanceCollector | None = None,
     ) -> None:
         self._connection: sqlite3.Connection | None = bootstrap_sqlite_connection(database_path)
         self._clock = clock
         self._failure_injector = failure_injector
         self._redactor = redactor or output_redactor()
+        self._zero_scope_clearance_collector = zero_scope_clearance_collector
 
     def close(self) -> None:
         """Close the thread-confined SQLite connection deterministically."""
@@ -1168,9 +1173,13 @@ class SQLiteExecutionLedger(ExecutionLedger):
         actor_label: str,
         *,
         assessment_ids: tuple[str, ...],
-        zero_scope_proof: ZeroScopeClearanceProof | None = None,
     ) -> bool:
         """Move to RECOVERING only after processed work and normalized terminal evidence."""
+        zero_scope_proof = None
+        if not self._has_active_recovery_scopes():
+            zero_scope_proof = self._collect_zero_scope_clearance()
+            if zero_scope_proof is None:
+                return False
         connection = self._require_connection()
         with transaction(connection):
             if not actor_label or self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.LATCHED:
@@ -1205,38 +1214,44 @@ class SQLiteExecutionLedger(ExecutionLedger):
         ).fetchall()
         return tuple(_recovery_scope_from_row(row) for row in rows)
 
-    def get_pending_zero_scope_recovery_challenge(self) -> str | None:
-        """Return the single durable, unexpired zero-scope completion binding."""
+    def _pending_zero_scope_recovery_challenge(self) -> str | None:
+        """Load the internal-only pending recovery binding before fresh collection."""
         connection = self._require_connection()
-        with transaction(connection):
-            if self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.RECOVERING:
-                return None
-            rows = connection.execute(
-                """
-                SELECT transition_challenge, challenge_expires_at_utc
-                FROM zero_scope_recovery_transitions
-                WHERE status = 'pending'
-                """
-            ).fetchall()
-            if len(rows) != 1:
-                return None
-            challenge, expires_at = rows[0]
-            try:
-                expires = _timestamp_from_text(str(expires_at))
-            except LedgerStorageError:
-                return None
-            if self.utc_now() >= expires:
-                return None
-            return str(challenge)
+        if self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.RECOVERING:
+            return None
+        rows = connection.execute(
+            """
+            SELECT transition_challenge, challenge_expires_at_utc
+            FROM zero_scope_recovery_transitions
+            WHERE status = 'pending'
+            """
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        challenge, expires_at = rows[0]
+        try:
+            expires = _timestamp_from_text(str(expires_at))
+        except LedgerStorageError:
+            return None
+        if self.utc_now() >= expires:
+            return None
+        return str(challenge)
 
     def complete_kill_switch_recovery(
         self,
         actor_label: str,
         *,
         assessment_ids: tuple[str, ...],
-        zero_scope_proof: ZeroScopeClearanceProof | None = None,
     ) -> bool:
         """Return READY only after explicit operator action and a fresh accepted assessment."""
+        zero_scope_proof = None
+        if not self._has_active_recovery_scopes():
+            challenge = self._pending_zero_scope_recovery_challenge()
+            if challenge is None:
+                return False
+            zero_scope_proof = self._collect_zero_scope_clearance(transition_challenge=challenge)
+            if zero_scope_proof is None:
+                return False
         connection = self._require_connection()
         with transaction(connection):
             if (
@@ -1660,6 +1675,22 @@ class SQLiteExecutionLedger(ExecutionLedger):
             (OrderState.FILLED.value, OrderState.CANCELLED.value, OrderState.REJECTED.value),
         ).fetchone()[0]
         return pending_work == 0 and unresolved == 0 and unresolved_claims == 0
+
+    def _has_active_recovery_scopes(self) -> bool:
+        """Read the durable scope selector before any ledger-owned gateway collection."""
+        count = self._require_connection().execute(
+            "SELECT COUNT(*) FROM recovery_scopes WHERE active = 1"
+        ).fetchone()[0]
+        return bool(count)
+
+    def _collect_zero_scope_clearance(
+        self, *, transition_challenge: str | None = None
+    ) -> ZeroScopeClearanceProof | None:
+        """Collect zero-scope facts only from the constructor-owned collaborator."""
+        collector = self._zero_scope_clearance_collector
+        if collector is None:
+            return None
+        return collector.collect(transition_challenge=transition_challenge)
 
     def _recovery_clearance_matches_current_scopes_in_transaction(
         self,

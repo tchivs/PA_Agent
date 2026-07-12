@@ -5,7 +5,6 @@ from collections.abc import Callable
 from datetime import datetime
 
 from pa_agent.trading.application.recovery_assessment import RecoveryAssessmentService
-from pa_agent.trading.application.zero_scope_clearance import ZeroScopeClearanceCollector
 from pa_agent.trading.domain.approval import CancellationWork, KillSwitchState
 from pa_agent.trading.ports.gateway import TradingGateway
 from pa_agent.trading.ports.ledger import ExecutionLedger
@@ -21,17 +20,12 @@ class KillSwitchService:
         gateway: TradingGateway,
         utc_now: Callable[[], datetime],
         recovery_assessment_service: RecoveryAssessmentService | None = None,
-        zero_scope_clearance_collector: ZeroScopeClearanceCollector | None = None,
     ) -> None:
         self._ledger = ledger
         self._gateway = gateway
         self._utc_now = utc_now
         self._recovery_assessment_service = recovery_assessment_service or RecoveryAssessmentService(
             ledger=ledger, gateway=gateway, utc_now=utc_now
-        )
-        self._zero_scope_clearance_collector = (
-            zero_scope_clearance_collector
-            or ZeroScopeClearanceCollector(gateway=gateway, utc_now=utc_now)
         )
 
     def latch(
@@ -78,13 +72,8 @@ class KillSwitchService:
         if not scopes:
             if assessment_ids not in (None, ()):
                 return False
-            proof = self._zero_scope_clearance_collector.collect()
-            if proof is None:
-                return False
             try:
-                return self._ledger.begin_kill_switch_recovery(
-                    actor_label, assessment_ids=(), zero_scope_proof=proof
-                )
+                return self._ledger.begin_kill_switch_recovery(actor_label, assessment_ids=())
             except Exception:
                 return False
         ids = assessment_ids
@@ -113,20 +102,7 @@ class KillSwitchService:
             if assessment_ids not in (None, ()):
                 return False
             try:
-                transition_challenge = self._ledger.get_pending_zero_scope_recovery_challenge()
-            except Exception:
-                return False
-            if transition_challenge is None:
-                return False
-            proof = self._zero_scope_clearance_collector.collect(
-                transition_challenge=transition_challenge
-            )
-            if proof is None:
-                return False
-            try:
-                return self._ledger.complete_kill_switch_recovery(
-                    actor_label, assessment_ids=(), zero_scope_proof=proof
-                )
+                return self._ledger.complete_kill_switch_recovery(actor_label, assessment_ids=())
             except Exception:
                 return False
         if assessment_ids is None:

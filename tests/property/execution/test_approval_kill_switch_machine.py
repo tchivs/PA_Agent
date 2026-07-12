@@ -9,6 +9,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from pa_agent.trading.application.kill_switch import KillSwitchService
+from pa_agent.trading.application.zero_scope_clearance import ZeroScopeClearanceCollector
 from pa_agent.trading.domain.approval import KillSwitchStatus
 from pa_agent.trading.domain.models import (
     AccountObservation,
@@ -77,9 +78,16 @@ def test_zero_scope_latch_state_machine_requires_begin_then_complete() -> None:
     """READY is reachable from a no-order latch only after both proof-bearing actions."""
     with TemporaryDirectory() as directory:
         clock = _Clock()
-        ledger = SQLiteExecutionLedger(Path(directory) / "execution.sqlite3", clock=clock)
+        gateway = _ZeroScopeGateway(clock)
+        ledger = SQLiteExecutionLedger(
+            Path(directory) / "execution.sqlite3",
+            clock=clock,
+            zero_scope_clearance_collector=ZeroScopeClearanceCollector(
+                gateway=gateway, utc_now=clock.utc_now
+            ),
+        )
         service = KillSwitchService(
-            ledger=ledger, gateway=_ZeroScopeGateway(clock), utc_now=clock.utc_now
+            ledger=ledger, gateway=gateway, utc_now=clock.utc_now
         )
         try:
             service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")

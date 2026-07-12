@@ -24,7 +24,6 @@ from pa_agent.trading.domain.models import (
     OrderState,
 )
 from pa_agent.trading.domain.risk import EvidenceBundle, RiskAssessment
-from pa_agent.trading.domain.zero_scope_clearance import ZeroScopeClearanceProof
 
 _NONTERMINAL_SUBMISSION_STATES = frozenset(
     {
@@ -233,27 +232,17 @@ class ExecutionLedger(Protocol):
         actor_label: str,
         *,
         assessment_ids: tuple[str, ...],
-        zero_scope_proof: ZeroScopeClearanceProof | None = None,
     ) -> bool:
-        """Move LATCHED only through exact assessments or an ID-free empty-scope proof."""
+        """Move LATCHED only through exact assessment IDs or ledger-owned clearance."""
 
     def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
         """Return each persisted account/product scope needing fresh gateway evidence."""
-
-    def get_pending_zero_scope_recovery_challenge(self) -> str | None:
-        """Return one opaque pending zero-scope transition binding while RECOVERING.
-
-        The value is a recovery-only reconciliation binding. It is not an
-        assessment ID, ticket, command, claim, permit, outbound value, or
-        gateway capability.
-        """
 
     def complete_kill_switch_recovery(
         self,
         actor_label: str,
         *,
         assessment_ids: tuple[str, ...],
-        zero_scope_proof: ZeroScopeClearanceProof | None = None,
     ) -> bool:
         """Return READY only through separately revalidated current clearance."""
 

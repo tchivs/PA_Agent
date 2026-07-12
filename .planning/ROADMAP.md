@@ -83,7 +83,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/application/intent_factory.py`, `risk_engine.py`, `execution_coordinator.py`, `reconciler.py`, `security/`; extend non-secret settings through `pa_agent/config/settings.py`; integrate from `pa_agent/app_context.py` without adding execution behavior to `pa_agent/gui/main_window.py`, `pa_agent/gui/order_opportunity.py`, or `pa_agent/notify/`.
 **Key risks and gates**: The existing Stage 2 payload and alert pipeline must never receive a submission capability. Product context carries leverage, borrow/repay, margin mode, and position mode; leverage is not a generic order field. Fresh exchange evidence is mandatory before submit, and failed evidence rejects rather than using cached values.
-**Plans**: 22/24 plans complete (2 final review gap-closure plans pending)
+**Plans**: 24/25 plans complete (1 zero-scope replay gap-closure plan pending)
 
 Plans:
 **Wave 1**
@@ -162,7 +162,11 @@ Plans:
 
 **Final Review Gap Closure Wave 9** *(blocked on 02-23)*
 
-- [ ] 02-24-PLAN.md — Permit an explicitly audited zero-scope kill-switch recovery without fabricating assessments, while preserving scoped fresh-evidence recovery.
+- [x] 02-24-PLAN.md — Permit an explicitly audited zero-scope kill-switch recovery without fabricating assessments, while preserving scoped fresh-evidence recovery.
+
+**Verification Gap Closure Wave 10** *(blocked on 02-24)*
+
+- [ ] 02-25-PLAN.md — Bind zero-scope complete to a persisted one-time transition challenge so begin proofs cannot be replayed after restart.
 
 ### Phase 3: Paper Product Core
 

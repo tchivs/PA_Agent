@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: approval-and-risk-boundary
 status: executing
-stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-07-12T11:20:26.161Z"
+stopped_at: Completed 02-07-PLAN.md
+last_updated: "2026-07-12T11:32:24.216Z"
 last_activity: 2026-07-12
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 17
-  completed_plans: 14
-  percent: 82
+  completed_plans: 15
+  percent: 88
 ---
 
 # Project State
@@ -29,30 +29,30 @@ See: `.planning/PROJECT.md` (updated 2026-07-11)
 ## Current Position
 
 Phase: 02 (approval-and-risk-boundary) - EXECUTING
-Plan: 7 of 8
+Plan: 8 of 8
 Status: Ready to execute
 Last activity: 2026-07-12 - Phase 02 execution started
 
-Progress: [████████░░] 82%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 13
+- Total plans completed: 15
 - Average duration: 6 min
-- Total execution time: 0.8 hours
+- Total execution time: 1.0 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01. Execution Foundation | 4 | 29 min | 7 min |
-| 02. Approval And Risk Boundary | 5 | 33 min | 7 min |
+| 02. Approval And Risk Boundary | 7 | 52 min | 7 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 02-01 (6 min), 02-02 (5 min), 02-03 (4 min), 02-04 (6 min), 02-05 (12 min)
+- Last 5 plans: 02-03 (4 min), 02-04 (6 min), 02-05 (12 min), 02-08 (9 min), 02-07 (10 min)
 - Trend: Stable
 
 | Phase 01 P03 | 8 min | 2 tasks | 8 files |
@@ -67,6 +67,7 @@ Progress: [████████░░] 82%
 | Phase 02 P04 | 6 min | 2 tasks | 8 files |
 | Phase 02 P05 | 12 min | 2 tasks | 6 files |
 | Phase 02 P08 | 9 min | 2 tasks | 9 files |
+| Phase 02 P07 | 10 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 02]: ProposalService persists controlled candidate, rejection, evidence, fee, and risk facts before ticket issuance; the audit port has no consumption or outbound authority.
 - [Phase 02]: Approval tickets are unique on candidate, policy, and evidence digests and expire after a fixed 60 seconds. — Idempotent review issuance must not allocate another pending ticket after retry or reopen.
 - [Phase 02]: ApprovalService issues and terminates review tickets only; Plan 02-07 retains consumption and outbound authority. — Maintains the protected outbound authorization boundary.
+- [Phase 02]: Current ticket consumption refreshes all evidence and risk before one immediate SQLite transaction records consumed status, the generated client ID, and outbound_started. — Prevents stale approval replay and keeps the gateway boundary limited to ledger-produced outbound authority.
 
 ### Pending Todos
 
@@ -113,6 +115,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-12T11:20:26.051Z
-Stopped at: Completed 02-08-PLAN.md
+Last session: 2026-07-12T11:32:24.209Z
+Stopped at: Completed 02-07-PLAN.md
 Resume file: None

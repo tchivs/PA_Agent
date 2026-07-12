@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -19,6 +20,7 @@ from pa_agent.trading.domain.approval import (
     ExecutionTarget,
     KillSwitchState,
     KillSwitchStatus,
+    RecoveryAssessment,
     RecoveryScope,
     SourceAnalysisSnapshot,
     TicketBinding,
@@ -1160,6 +1162,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 (KillSwitchStatus.LATCHED.value, reason, actor_label, policy_summary, evidence_summary, now),
             )
             self._record_kill_switch_event(KillSwitchStatus.LATCHED, reason, actor_label, now)
+            self._replace_recovery_scopes_in_transaction(now)
             pending_rows = connection.execute(
                 """
                 SELECT ticket_id, binding_json, status, created_at_utc, expires_at_utc,
@@ -1262,39 +1265,101 @@ class SQLiteExecutionLedger(ExecutionLedger):
             ).fetchone()
             return CancellationWork(*row)
 
-    def begin_kill_switch_recovery(self, actor_label: str) -> bool:
+    def record_recovery_assessment(
+        self, scope: RecoveryScope | None, assessment: RecoveryAssessment
+    ) -> RecoveryAssessment | None:
+        """Mint an ID only after the asserted scope matches the active durable row."""
+        if type(scope) is not RecoveryScope or type(assessment) is not RecoveryAssessment:
+            return None
+        connection = self._require_connection()
+        with transaction(connection):
+            durable_scope = self._load_current_recovery_scope_in_transaction(scope.persistent_scope_id)
+            if durable_scope is None or durable_scope != scope:
+                return None
+            if (
+                assessment.persistent_scope_id != scope.persistent_scope_id
+                or assessment.scope_digest != scope.scope_digest
+                or assessment.target_digest != scope.target_digest
+                or assessment.policy_version != scope.policy_version
+                or assessment.policy_digest != scope.policy_digest
+                or assessment.recovery_assessment_id is not None
+                or not self._recovery_evidence_is_complete(assessment.evidence_json, assessment.evidence_digest)
+            ):
+                return None
+            assessment_id = _new_id("recovery-assessment")
+            connection.execute(
+                """
+                INSERT INTO recovery_assessments(
+                    recovery_assessment_id, persistent_scope_id, scope_digest, target_digest,
+                    policy_version, policy_digest, evidence_digest, evidence_json, accepted,
+                    reason_codes_json, observed_at_utc, recorded_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assessment_id,
+                    assessment.persistent_scope_id,
+                    assessment.scope_digest,
+                    assessment.target_digest,
+                    assessment.policy_version,
+                    assessment.policy_digest,
+                    assessment.evidence_digest,
+                    assessment.evidence_json,
+                    int(assessment.accepted),
+                    _canonical_json(assessment.reason_codes),
+                    _timestamp_text(assessment.observed_at),
+                    _timestamp_text(self.utc_now()),
+                ),
+            )
+            return replace(assessment, recovery_assessment_id=assessment_id)
+
+    def count_recovery_assessments(self) -> int:
+        """Expose a test-only count without returning recovery data as authority."""
+        return int(
+            self._require_connection().execute("SELECT COUNT(*) FROM recovery_assessments").fetchone()[0]
+        )
+
+    def begin_kill_switch_recovery(self, actor_label: str, *, assessment_ids: tuple[str, ...]) -> bool:
         """Move to RECOVERING only after processed work and normalized terminal evidence."""
         connection = self._require_connection()
         with transaction(connection):
             if not actor_label or self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.LATCHED:
                 return False
-            if not self._recovery_facts_are_clear_in_transaction():
+            if (
+                not self._recovery_facts_are_clear_in_transaction()
+                or not self._recovery_assessments_match_current_scopes_in_transaction(assessment_ids)
+            ):
                 return False
-            self._set_kill_switch_status_in_transaction(KillSwitchStatus.RECOVERING, actor_label, _timestamp_text(self.utc_now()))
+            self._set_kill_switch_status_in_transaction(
+                KillSwitchStatus.RECOVERING, actor_label, _timestamp_text(self.utc_now()), assessment_ids
+            )
             return True
 
     def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
-        """Return account/product pairs from durable commands without accepting caller scope."""
+        """Return only active immutable scopes created at the durable latch boundary."""
         rows = self._require_connection().execute(
-            "SELECT DISTINCT account_id, product FROM order_commands ORDER BY account_id, product"
+            """
+            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest, scope_digest
+            FROM recovery_scopes WHERE active = 1 ORDER BY persistent_scope_id
+            """
         ).fetchall()
-        try:
-            return tuple(RecoveryScope(account_id=row[0], product=ProductType(row[1])) for row in rows)
-        except ValueError as exc:
-            raise LedgerStorageError("stored recovery scope product is invalid") from exc
+        return tuple(_recovery_scope_from_row(row) for row in rows)
 
-    def complete_kill_switch_recovery(self, actor_label: str, *, assessment_accepted: bool) -> bool:
+    def complete_kill_switch_recovery(
+        self, actor_label: str, *, assessment_ids: tuple[str, ...]
+    ) -> bool:
         """Return READY only after explicit operator action and a fresh accepted assessment."""
         connection = self._require_connection()
         with transaction(connection):
             if (
                 not actor_label
-                or not assessment_accepted
                 or self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.RECOVERING
                 or not self._recovery_facts_are_clear_in_transaction()
+                or not self._recovery_assessments_match_current_scopes_in_transaction(assessment_ids)
             ):
                 return False
-            self._set_kill_switch_status_in_transaction(KillSwitchStatus.READY, actor_label, _timestamp_text(self.utc_now()))
+            self._set_kill_switch_status_in_transaction(
+                KillSwitchStatus.READY, actor_label, _timestamp_text(self.utc_now()), assessment_ids
+            )
             return True
 
     def terminate_approval_ticket(
@@ -1715,8 +1780,167 @@ class SQLiteExecutionLedger(ExecutionLedger):
         ).fetchone()[0]
         return pending_work == 0 and unresolved == 0
 
+    def _replace_recovery_scopes_in_transaction(self, created_at: str) -> None:
+        """Snapshot the fixed target/policy set at each latch, never from a recovery caller."""
+        connection = self._require_connection()
+        connection.execute("UPDATE recovery_scopes SET active = 0 WHERE active = 1")
+        command_rows = connection.execute(
+            "SELECT DISTINCT mode, account_id, product FROM order_commands ORDER BY mode, account_id, product"
+        ).fetchall()
+        for mode, account_id, product in command_rows:
+            try:
+                target = ExecutionTarget(
+                    target_id="paper-spot-primary",
+                    mode=Mode(str(mode)),
+                    account_id=str(account_id),
+                    product=ProductType(str(product)),
+                )
+                policy = select_phase2_policy(target)
+            except (TypeError, ValueError) as exc:
+                raise LedgerStorageError("durable recovery scope is not a fixed Phase 2 target") from exc
+            target_json = _canonical_json(canonicalize(target))
+            target_digest = _digest_text(target_json)
+            scope_digest = _digest_text(
+                _canonical_json(
+                    {
+                        "target_digest": target_digest,
+                        "policy_version": policy.policy_version,
+                        "policy_digest": policy.policy_digest,
+                    }
+                )
+            )
+            connection.execute(
+                """
+                INSERT INTO recovery_scopes(
+                    persistent_scope_id, target_json, target_digest, policy_version, policy_digest,
+                    scope_digest, active, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    _new_id("recovery-scope"),
+                    target_json,
+                    target_digest,
+                    policy.policy_version,
+                    policy.policy_digest,
+                    scope_digest,
+                    created_at,
+                ),
+            )
+
+    def _load_current_recovery_scope_in_transaction(
+        self, persistent_scope_id: str
+    ) -> RecoveryScope | None:
+        """Load exactly one active scope using the opaque ledger-issued identity."""
+        row = self._require_connection().execute(
+            """
+            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest, scope_digest
+            FROM recovery_scopes WHERE persistent_scope_id = ? AND active = 1
+            """,
+            (persistent_scope_id,),
+        ).fetchone()
+        return None if row is None else _recovery_scope_from_row(row)
+
+    @staticmethod
+    def _recovery_evidence_is_complete(evidence_json: str, evidence_digest: str) -> bool:
+        """Require canonical storage of every recovery observation before clearance is durable."""
+        try:
+            evidence = json.loads(evidence_json)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        required_observations = {
+            "capabilities",
+            "rules",
+            "account",
+            "quote",
+            "server_time",
+            "connection",
+            "open_orders",
+            "order_rate",
+            "loss_drawdown",
+            "fee_rate",
+        }
+        return (
+            isinstance(evidence, dict)
+            and required_observations.issubset(evidence)
+            and _canonical_json(evidence) == evidence_json
+            and _digest_text(evidence_json) == evidence_digest
+        )
+
+    def _recovery_assessments_match_current_scopes_in_transaction(
+        self, assessment_ids: tuple[str, ...]
+    ) -> bool:
+        """Verify exact active-scope coverage and all clearance predicates in this transaction."""
+        if not assessment_ids or len(set(assessment_ids)) != len(assessment_ids):
+            return False
+        connection = self._require_connection()
+        scopes = connection.execute(
+            """
+            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest, scope_digest
+            FROM recovery_scopes WHERE active = 1 ORDER BY persistent_scope_id
+            """
+        ).fetchall()
+        if len(scopes) != len(assessment_ids):
+            return False
+        placeholders = ", ".join("?" for _ in assessment_ids)
+        rows = connection.execute(
+            f"""
+            SELECT assessment.recovery_assessment_id, assessment.persistent_scope_id,
+                   assessment.scope_digest, assessment.target_digest, assessment.policy_version,
+                   assessment.policy_digest, assessment.evidence_digest, assessment.evidence_json,
+                   assessment.accepted, assessment.observed_at_utc,
+                   scope.target_digest, scope.policy_version, scope.policy_digest, scope.scope_digest
+            FROM recovery_assessments AS assessment
+            JOIN recovery_scopes AS scope ON scope.persistent_scope_id = assessment.persistent_scope_id
+            WHERE scope.active = 1 AND assessment.recovery_assessment_id IN ({placeholders})
+            """,
+            assessment_ids,
+        ).fetchall()
+        if len(rows) != len(assessment_ids) or {row[0] for row in rows} != set(assessment_ids):
+            return False
+        expected_scope_ids = {row[0] for row in scopes}
+        now = self.utc_now()
+        for row in rows:
+            (
+                _,
+                persistent_scope_id,
+                scope_digest,
+                target_digest,
+                policy_version,
+                policy_digest,
+                evidence_digest,
+                evidence_json,
+                accepted,
+                observed_at,
+                durable_target_digest,
+                durable_policy_version,
+                durable_policy_digest,
+                durable_scope_digest,
+            ) = row
+            if persistent_scope_id not in expected_scope_ids or accepted != 1:
+                return False
+            if (
+                scope_digest != durable_scope_digest
+                or target_digest != durable_target_digest
+                or policy_version != durable_policy_version
+                or policy_digest != durable_policy_digest
+                or not self._recovery_evidence_is_complete(str(evidence_json), str(evidence_digest))
+            ):
+                return False
+            try:
+                observed = _timestamp_from_text(str(observed_at))
+            except LedgerStorageError:
+                return False
+            age_seconds = (now.astimezone(UTC) - observed).total_seconds()
+            if age_seconds < 0 or age_seconds > 60:
+                return False
+        return {row[1] for row in rows} == expected_scope_ids
+
     def _set_kill_switch_status_in_transaction(
-        self, status: KillSwitchStatus, actor_label: str, occurred_at: str
+        self,
+        status: KillSwitchStatus,
+        actor_label: str,
+        occurred_at: str,
+        recovery_assessment_ids: tuple[str, ...] | None = None,
     ) -> None:
         """Transition the singleton and append a bounded operator audit event."""
         changed = self._require_connection().execute(
@@ -1725,16 +1949,31 @@ class SQLiteExecutionLedger(ExecutionLedger):
         )
         if changed.rowcount != 1:
             raise LedgerStorageError("kill switch state is missing")
-        self._record_kill_switch_event(status, None, actor_label, occurred_at)
+        self._record_kill_switch_event(
+            status, None, actor_label, occurred_at, recovery_assessment_ids
+        )
 
     def _record_kill_switch_event(
-        self, status: KillSwitchStatus, reason: str | None, actor_label: str, occurred_at: str
+        self,
+        status: KillSwitchStatus,
+        reason: str | None,
+        actor_label: str,
+        occurred_at: str,
+        recovery_assessment_ids: tuple[str, ...] | None = None,
     ) -> None:
         """Append one bounded safety-state event while an immediate transaction is active."""
         self._require_connection().execute(
-            """INSERT INTO kill_switch_events(event_id, status, reason, actor_label, occurred_at_utc)
-            VALUES (?, ?, ?, ?, ?)""",
-            (_new_id("kill-switch-event"), status.value, reason, actor_label, occurred_at),
+            """INSERT INTO kill_switch_events(
+                event_id, status, reason, actor_label, occurred_at_utc, recovery_assessment_ids_json
+            ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                _new_id("kill-switch-event"),
+                status.value,
+                reason,
+                actor_label,
+                occurred_at,
+                _canonical_json(recovery_assessment_ids) if recovery_assessment_ids is not None else None,
+            ),
         )
 
     def _append_event(
@@ -1855,6 +2094,32 @@ def _command_from_canonical_json(command_json: str) -> ExecutionCommand:
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise LedgerStorageError("stored command JSON is invalid") from exc
+
+
+def _recovery_scope_from_row(row: tuple[object, ...]) -> RecoveryScope:
+    """Rebuild a scope only from its immutable persisted snapshot."""
+    try:
+        target_data = json.loads(str(row[1]))
+        target = ExecutionTarget(
+            target_id=str(target_data["target_id"]),
+            mode=Mode(str(target_data["mode"])),
+            account_id=str(target_data["account_id"]),
+            product=ProductType(str(target_data["product"])),
+        )
+        return RecoveryScope(
+            persistent_scope_id=str(row[0]),
+            target=target,
+            target_digest=str(row[2]),
+            policy_version=str(row[3]),
+            policy_digest=str(row[4]),
+            scope_digest=str(row[5]),
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise LedgerStorageError("stored recovery scope is invalid") from exc
+
+
+def _digest_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _canonical_json(value: Any) -> str:

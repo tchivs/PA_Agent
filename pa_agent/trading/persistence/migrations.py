@@ -339,10 +339,53 @@ _OUTBOUND_DISPATCH_SCHEMA_STATEMENTS = (
 )
 
 
+def _create_recovery_assessment_schema(connection: sqlite3.Connection) -> None:
+    """Persist immutable recovery scopes and their restricted clearance facts."""
+    for statement in _RECOVERY_ASSESSMENT_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+
+
+_RECOVERY_ASSESSMENT_SCHEMA_STATEMENTS = (
+    "ALTER TABLE kill_switch_events ADD COLUMN recovery_assessment_ids_json TEXT",
+    """
+    CREATE TABLE recovery_scopes (
+        persistent_scope_id TEXT PRIMARY KEY,
+        target_json TEXT NOT NULL,
+        target_digest TEXT NOT NULL,
+        policy_version TEXT NOT NULL,
+        policy_digest TEXT NOT NULL,
+        scope_digest TEXT NOT NULL,
+        active INTEGER NOT NULL CHECK(active IN (0, 1)),
+        created_at_utc TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX recovery_scopes_current_idx ON recovery_scopes(active, persistent_scope_id)",
+    """
+    CREATE TABLE recovery_assessments (
+        recovery_assessment_id TEXT PRIMARY KEY,
+        persistent_scope_id TEXT NOT NULL REFERENCES recovery_scopes(persistent_scope_id),
+        scope_digest TEXT NOT NULL,
+        target_digest TEXT NOT NULL,
+        policy_version TEXT NOT NULL,
+        policy_digest TEXT NOT NULL,
+        evidence_digest TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        accepted INTEGER NOT NULL CHECK(accepted IN (0, 1)),
+        reason_codes_json TEXT NOT NULL,
+        observed_at_utc TEXT NOT NULL,
+        recorded_at_utc TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX recovery_assessments_scope_idx "
+    "ON recovery_assessments(persistent_scope_id, recovery_assessment_id)",
+)
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
     Migration(3, _create_approval_ticket_schema),
     Migration(4, _create_kill_switch_schema),
     Migration(5, _create_outbound_dispatch_schema),
+    Migration(6, _create_recovery_assessment_schema),
 )

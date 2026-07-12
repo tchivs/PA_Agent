@@ -203,7 +203,7 @@ def test_concurrent_fresh_constructors_bootstrap_once_and_admit_one_claim(
     try:
         assert connection.execute(
             "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
-        ).fetchall() == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+        ).fetchall() == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
         assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("PRAGMA synchronous").fetchone() == (2,)
@@ -243,7 +243,7 @@ def test_concurrent_reopened_constructors_preserve_schema_and_admit_one_claim(
     try:
         assert connection.execute(
             "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
-        ).fetchall() == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+        ).fetchall() == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
         assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("PRAGMA synchronous").fetchone() == (2,)

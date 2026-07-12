@@ -96,7 +96,11 @@ class ApprovalKillSwitchMachine(RuleBasedStateMachine):
             policy_version="phase2-v1",
             policy_digest="fabricated-policy",
             evidence_digest="fabricated-evidence",
-            evidence_json='{"complete":true}',
+            evidence_json=(
+                '{"account":{},"capabilities":{},"connection":{},"fee_rate":{},'
+                '"loss_drawdown":{},"open_orders":{},"order_rate":{},"quote":{},'
+                '"rules":{},"server_time":{}}'
+            ),
             accepted=True,
             reason_codes=(),
             observed_at=datetime(2026, 7, 12, tzinfo=UTC),

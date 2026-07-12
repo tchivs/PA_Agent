@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 01
-current_phase_name: execution-foundation
-status: complete
-stopped_at: Phase 2 context gathered
-last_updated: "2026-07-12T04:29:39.866Z"
-last_activity: 2026-07-11
-last_activity_desc: Phase 01 verification passed
+current_phase: 02
+current_phase_name: approval-and-risk-boundary
+status: executing
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-07-12T10:25:45.132Z"
+last_activity: 2026-07-12
+last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 7
   completed_phases: 0
-  total_plans: 9
-  completed_plans: 8
+  total_plans: 17
+  completed_plans: 9
   percent: 0
 ---
 
@@ -24,14 +24,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-07-11)
 
 **Core value:** An operator can safely turn a validated analysis recommendation into an explicitly approved, traceable order without coupling strategy logic to a particular exchange.
-**Current focus:** Phase 01 — execution-foundation complete
+**Current focus:** Phase 02 — approval-and-risk-boundary
 
 ## Current Position
 
-Phase: 01 (execution-foundation) — COMPLETE
-Plan: 8 of 8
-Status: Verified — 10/10 must-haves passed
-Last activity: 2026-07-11 — Phase 01 verification passed
+Phase: 02 (approval-and-risk-boundary) — EXECUTING
+Plan: 2 of 8
+Status: Ready to execute
+Last activity: 2026-07-12 — Phase 02 execution started
 
 Progress: [██████████] 100%
 
@@ -60,6 +60,7 @@ Progress: [██████████] 100%
 | Phase 01 P06 | 5 min | 2 tasks | 9 files |
 | Phase 01 P07 | 5 min | 2 tasks | 6 files |
 | Phase 01 P08 | 5 min | 2 tasks | 5 files |
+| Phase 02 P01 | 6 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase ?]: SQLite bootstrap uses a process-local lock keyed by Path.resolve(strict=False) so equivalent path spellings serialize without blocking distinct databases.
 - [Phase ?]: Each SQLite migration reads its applied version inside the same immediate transaction as DDL and schema metadata insertion.
 - [Phase ?]: SQLiteExecutionLedger obtains usable connections only from guarded bootstrap, retaining fail-closed WAL, FULL, foreign-key, and busy-timeout policy.
+- [Phase 02]: Only explicit Paper Spot targets may produce candidates; target changes and frozen source provenance are included in the candidate digest, while conversion has no gateway, ledger, or submission authority.
 
 ### Pending Todos
 
@@ -104,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-12T04:29:39.859Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-approval-and-risk-boundary/02-CONTEXT.md
+Last session: 2026-07-12T10:25:45.124Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

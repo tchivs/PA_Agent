@@ -65,7 +65,7 @@ PA Agent will provide a local, operator-controlled execution subsystem for crypt
 |-------------|-------|--------|
 | CORE-01 | Phase 1 | Complete |
 | CORE-02 | Phase 1 | Complete |
-| CORE-03 | Phase 2 | Pending |
+| CORE-03 | Phase 2 | Complete |
 | CORE-04 | Phase 1 | Complete |
 | SIM-01 | Phase 3 | Pending |
 | SIM-02 | Phase 1 | Complete |

@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: approval-and-risk-boundary
 status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-07-12T11:08:41Z"
+stopped_at: Completed 02-08-PLAN.md
+last_updated: "2026-07-12T11:20:26.161Z"
 last_activity: 2026-07-12
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 17
-  completed_plans: 13
-  percent: 76
+  completed_plans: 14
+  percent: 82
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-11)
 ## Current Position
 
 Phase: 02 (approval-and-risk-boundary) - EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Status: Ready to execute
 Last activity: 2026-07-12 - Phase 02 execution started
 
-Progress: [████████░░] 76%
+Progress: [████████░░] 82%
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ Progress: [████████░░] 76%
 | Phase 02 P03 | 4 min | 2 tasks | 6 files |
 | Phase 02 P04 | 6 min | 2 tasks | 8 files |
 | Phase 02 P05 | 12 min | 2 tasks | 6 files |
+| Phase 02 P08 | 9 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 02]: RiskEngine is pure and returns digest-bound reason-coded assessments from target-bound evidence.
 - [Phase 02]: FreshEvidenceCollector refreshes all target-scoped evidence in fixed order and returns only canonical reason-coded failures.
 - [Phase 02]: ProposalService persists controlled candidate, rejection, evidence, fee, and risk facts before ticket issuance; the audit port has no consumption or outbound authority.
+- [Phase 02]: Approval tickets are unique on candidate, policy, and evidence digests and expire after a fixed 60 seconds. — Idempotent review issuance must not allocate another pending ticket after retry or reopen.
+- [Phase 02]: ApprovalService issues and terminates review tickets only; Plan 02-07 retains consumption and outbound authority. — Maintains the protected outbound authorization boundary.
 
 ### Pending Todos
 
@@ -110,6 +113,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-12T11:08:41Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-07-12T11:20:26.051Z
+Stopped at: Completed 02-08-PLAN.md
 Resume file: None

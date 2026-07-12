@@ -68,6 +68,23 @@ def test_withdrawal_capable_provider_result_is_rejected_before_execution_consume
     assert consumer.received == []
 
 
+def test_credential_failure_exposes_only_a_controlled_reason_code() -> None:
+    """Credential validation never renders resolved material in its public failure."""
+    result = ProviderCredentialResult(
+        reference=CredentialReference(provider="environment", reference_id="paper-spot-default"),
+        values={"api_key": API_KEY, "secret": API_SECRET, "passphrase": PASSPHRASE},
+        declared_permissions=frozenset({"trade", "withdraw"}),
+    )
+
+    with pytest.raises(CredentialSecurityError) as raised:
+        deliver_trading_credentials(result, lambda _: None)
+
+    rendered = str(raised.value)
+    assert rendered == "credential_permission_rejected"
+    for secret in (API_KEY, API_SECRET, PASSPHRASE):
+        assert secret not in rendered
+
+
 def test_withdrawal_capable_reference_is_rejected_before_provider_lookup() -> None:
     """A reference cannot ask a provider for a withdrawal-capable credential."""
     with pytest.raises(CredentialSecurityError, match="withdraw"):

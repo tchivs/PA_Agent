@@ -219,7 +219,7 @@ def propose(snapshot: SourceAnalysisSnapshot, target: ExecutionTarget) -> Candid
 
 **When to use:** 手动停止、风险阈值/证据故障、未知命令、恢复前置条件失败及启动恢复。
 
-**Implementation rule:** 锁存事务必须撤销所有待定票据并创建每个可取消开放单的取消请求/对账工作；它不得声称取消已经完成，也不得自动发送盲目平仓单。恢复要求所有未决命令和曝光已对账、显示残余风险、操作员确认和新的风险评估；精确的初始启动状态与取消对象范围是本阶段待确认的策略选择。[ASSUMED]
+**Implementation rule:** 锁存事务必须撤销所有待定票据，并且只为“规范化持久化开放订单中、其能力明确声明支持取消”的订单创建取消请求和对账工作；它不得发送盲目平仓单，也不得把取消请求当作取消完成。重置前，持久化取消/对账工作必须已处理，且新的规范账户、开放订单和仓位证据必须证明不存在未解决 submission claim 或策略定义的残余敞口；之后还必须由操作员显式恢复，并重新完成一次新鲜风险评估。范围不支持的产品仍被拒绝，不能通过假定借贷或杠杆规则进入恢复。[RESOLVED]
 
 ### Anti-Patterns to Avoid
 
@@ -332,31 +332,32 @@ class ApprovalMachine(RuleBasedStateMachine):
 - `has_order_opportunity()` 不能作为执行资格或审批依据；它仅是当前告警展示的启发式检查。[VERIFIED: codebase grep]
 - 在 `config/settings.json` 增加交易 API key、secret 或 passphrase 的做法禁止使用；当前 `save_settings()` 会直接序列化全部设置。[VERIFIED: codebase grep]
 
+## Resolved Phase 2 Product-Policy Decisions
+
+以下决议锁定本阶段所有执行者必须实现的产品与安全边界，并取代先前的待确认假设。
+
+1. **票据与策略版本：** 审批票据 TTL 固定为 **60 秒**，`policy_version` 固定为 **`"phase2-v1"`**。到期后必须依 D-06 刷新完整证据并重新进行风险评估；票据、调用方或设置不得传入替代 TTL 或策略版本。
+2. **可选目标与产品：** 本阶段只有 **Paper Spot** 可选择。所有 Testnet、Live 或其他非 Paper 目标都必须在候选/票据创建前以稳定原因码拒绝。隔离保证金与 USDT 永续不受支持并拒绝；不得为不支持产品发明杠杆、借贷或保证金阈值。
+3. **Paper Spot `phase2-v1` 固定策略：** 仅允许 `MARKET` 和 `LIMIT`；单笔最大名义金额为 **1000 USDT**；最大开放订单数为 **3**；滚动 60 秒最多接受 **5** 笔订单；UTC 日最大已实现损失为 **100 USDT**；UTC 日最大回撤为 **10 percent**。现有需求要求的精度、可用余额、价格偏离、滑点与敞口检查仍从当前能力/规则/账户/报价证据得出，不能由全局默认或临时调用方参数替换。
+4. **凭据边界：** 本阶段交付 reference-only `CredentialStore`、凭据非持久化和集中脱敏。未实现、未选择 OS keychain 或其他真实凭据后端；任何此类后端的选择与注入均不属于本阶段。
+5. **熔断取消与恢复：** 取消资格是 capability-aware：只包括规范化持久化开放订单且 capability 明确声明可取消的订单。取消不得使用盲目平仓订单。重置要求已处理持久化取消/对账工作、当前规范账户/开放订单/仓位证据、无未解决 submission claim、无策略定义的残余敞口、显式操作员恢复以及新的新鲜风险评估。
+
 ## Assumptions Log
 
 | # | Claim | Section | Risk if Wrong |
 |---|-------|---------|---------------|
-| A1 | 建议默认审批票据有效期为 60 秒，并作为固定策略值。 | Architecture Patterns | 产品可能需要不同的操作节奏；必须由用户/策略确认后锁定。 |
+| A1 | 审批票据有效期为 60 秒，`policy_version` 为 `phase2-v1`。 | Resolved Phase 2 Product-Policy Decisions | 已锁定；实现不得替换。 |
 | A2 | 票据消费应通过条件 `UPDATE`、rowcount 检查，并与 Phase 1 的命令绑定及 `outbound_started` 标记在同一 SQLite 事务中实现。 | Architecture Patterns | 若现有 ledger API 需要更深重构，计划必须调整迁移与接口任务。 |
 | A3 | 启动时，对存在未决命令/暴露的账户进入需要对账的锁存或恢复状态。 | Architecture Patterns | 过严可能影响 Paper 启动体验；过松会允许未对账的风险继续执行。 |
-| A4 | 本阶段仅实施凭据引用、抽象和脱敏，而将真实 OS keychain 后端绑定到有外部适配器的阶段。 | Summary | 若 SAFE-05 被解释为此阶段必须支持真实交易凭据持久化，则需要用户指定目标 OS/后端。 |
+| A4 | 本阶段仅实施 reference-only `CredentialStore`、凭据引用和脱敏；不选择或实现真实 OS keychain 后端。 | Resolved Phase 2 Product-Policy Decisions | 已锁定；真实后端留待外部适配器阶段的单独决策。 |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **票据有效期和风险阈值的已批准默认值是什么？**
-   - What we know: D-06 要求短暂固定有效期，D-08 要求策略/产品绑定。
-   - What's unclear: 60 秒、名义金额/暴露/频率/损失阈值尚未作为产品决定锁定。
-   - Recommendation: 在第一份 PLAN 中把初始 `RiskPolicy` 常量、`policy_version` 和票据 TTL 显式列为待确认配置；未确认前只使用保守 Paper 测试值。
+1. **票据有效期和风险阈值：RESOLVED。** 票据 TTL 为 60 秒，策略版本为 `phase2-v1`；唯一可选目标是 Paper Spot。允许 `MARKET`/`LIMIT`，单笔最大 1000 USDT，最大 3 笔开放订单，滚动 60 秒最多 5 笔接受订单，UTC 日最大已实现损失 100 USDT，最大日回撤 10 percent。非 Paper、隔离保证金及 USDT 永续在建票前拒绝；不会为不支持产品定义杠杆或借贷阈值。
 
-2. **本阶段是否必须交付跨平台持久化交易凭据后端？**
-   - What we know: 尚无外部交易适配器，Phase 5 才接入 Binance Spot Testnet；通用设置目前明文持久化。
-   - What's unclear: 目标系统和批准的 OS credential vault。
-   - Recommendation: 本阶段禁止交易秘密进入通用设置，交付 `CredentialStore`/`CredentialReference`/redactor 契约与测试；在启用任何真实连接前以人类检查点选择并验证具体后端。
+2. **凭据后端：RESOLVED。** 本阶段只交付 reference-only `CredentialStore`、凭据引用、非持久化与脱敏；不选择或实现 OS keychain 后端，也不连接任何真实网关。
 
-3. **熔断时哪些订单属于“可取消”以及恢复需要哪些对账范围？**
-   - What we know: D-12 要求熔断撤销批准；SAFE-03 要求请求取消开放单并刻意恢复。
-   - What's unclear: 是否排除 reduce-only 订单，以及 margin/perpetual 在后续产品阶段的债务/仓位恢复细节。
-   - Recommendation: Phase 2 定义 capability-aware `CancellationEligibility` 和可审计“请求取消”结果，不自动平仓；Phase 3/6 对每个产品扩充具体规则。
+3. **熔断取消和恢复：RESOLVED。** 仅 capability 明确支持取消的规范化持久化开放订单有资格创建取消/对账工作；不得发送盲目平仓订单。恢复必须处理持久化取消/对账工作，并以新鲜规范账户、开放订单和仓位证据证明不存在未解决 submission claim 或策略定义残余敞口，随后由操作员显式恢复并重新完成风险评估。
 
 ## Environment Availability
 

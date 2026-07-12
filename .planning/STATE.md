@@ -4,17 +4,17 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 current_phase_name: approval-and-risk-boundary
-status: executing
-stopped_at: Completed 02-07-PLAN.md
-last_updated: "2026-07-12T11:32:24.216Z"
+status: verifying
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-07-12T11:45:54.075Z"
 last_activity: 2026-07-12
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 7
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 17
-  completed_plans: 15
-  percent: 88
+  completed_plans: 16
+  percent: 14
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-07-11)
 
 Phase: 02 (approval-and-risk-boundary) - EXECUTING
 Plan: 8 of 8
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-12 - Phase 02 execution started
 
 Progress: [█████████░] 88%
@@ -68,6 +68,7 @@ Progress: [█████████░] 88%
 | Phase 02 P05 | 12 min | 2 tasks | 6 files |
 | Phase 02 P08 | 9 min | 2 tasks | 9 files |
 | Phase 02 P07 | 10 min | 2 tasks | 6 files |
+| Phase 02 P06 | 12 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -94,6 +95,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 02]: Approval tickets are unique on candidate, policy, and evidence digests and expire after a fixed 60 seconds. — Idempotent review issuance must not allocate another pending ticket after retry or reopen.
 - [Phase 02]: ApprovalService issues and terminates review tickets only; Plan 02-07 retains consumption and outbound authority. — Maintains the protected outbound authorization boundary.
 - [Phase 02]: Current ticket consumption refreshes all evidence and risk before one immediate SQLite transaction records consumed status, the generated client ID, and outbound_started. — Prevents stale approval replay and keeps the gateway boundary limited to ledger-produced outbound authority.
+- [Phase 02]: The SQLite ledger owns a restart-safe READY/LATCHED/RECOVERING latch; cancellation requests remain non-terminal evidence and recovery requires fresh account, open-order, position, and accepted assessment gates.
 
 ### Pending Todos
 
@@ -115,6 +117,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-12T11:32:24.209Z
-Stopped at: Completed 02-07-PLAN.md
+Last session: 2026-07-12T11:45:54.067Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None

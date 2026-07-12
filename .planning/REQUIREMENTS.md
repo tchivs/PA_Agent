@@ -76,7 +76,7 @@ PA Agent will provide a local, operator-controlled execution subsystem for crypt
 | EXCH-04 | Phase 7 | Pending |
 | SAFE-01 | Phase 2 | Complete |
 | SAFE-02 | Phase 2 | Complete |
-| SAFE-03 | Phase 2 | Pending |
+| SAFE-03 | Phase 2 | Complete |
 | SAFE-04 | Phase 2 | Complete |
 | SAFE-05 | Phase 2 | Complete |
 | UI-01 | Phase 4 | Pending |

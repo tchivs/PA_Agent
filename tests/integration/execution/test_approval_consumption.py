@@ -68,11 +68,13 @@ class _EvidenceAndSubmissionGateway:
         *,
         fail_refresh: bool = False,
         account_position_sequence: tuple[tuple[Position, ...], ...] | None = None,
+        quote_sequence: tuple[QuoteObservation, ...] | None = None,
     ) -> None:
         self.fail_refresh = fail_refresh
         self._account_position_sequence = (
             list(account_position_sequence) if account_position_sequence is not None else None
         )
+        self._quote_sequence = list(quote_sequence) if quote_sequence is not None else None
         self.call_order: list[str] = []
         self.outbound_submissions: list[OutboundSubmission] = []
 
@@ -106,6 +108,10 @@ class _EvidenceAndSubmissionGateway:
 
     def get_quote(self, symbol: str) -> QuoteObservation:
         self._record("quote")
+        if self._quote_sequence is not None:
+            if not self._quote_sequence:
+                raise AssertionError("unexpected quote lookup")
+            return self._quote_sequence.pop(0)
         return QuoteObservation(symbol, "7999.50", "8000", NOW)
 
     def get_server_time(self) -> TimeObservation:
@@ -307,6 +313,64 @@ def test_refreshed_over_limit_exposure_invalidates_ticket_before_outbound_author
             (ticket.ticket_id,),
         ).fetchone()
         assert (event_type, reason) == ("binding_invalidated", "risk_reassessment_rejected")
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("quotes", "reason"),
+    (
+        (
+            (
+                QuoteObservation("BTCUSDT", "7999.50", "8000", NOW),
+                QuoteObservation("BTCUSDT", "7919", "7919.50", NOW),
+            ),
+            "price_deviation_limit_exceeded",
+        ),
+        (
+            (
+                QuoteObservation("BTCUSDT", "7999.50", "8000", NOW),
+                QuoteObservation("BTCUSDT", "7995.50", "8000", NOW),
+            ),
+            "bid_ask_slippage_limit_exceeded",
+        ),
+    ),
+)
+def test_refreshed_over_limit_quote_metrics_invalidate_ticket_before_outbound_authority(
+    execution_database_path: Path,
+    quotes: tuple[QuoteObservation, QuoteObservation],
+    reason: str,
+) -> None:
+    """Fresh adverse quote facts invalidate prior approval before SQLite outbound authority."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway(quote_sequence=quotes)
+    ticket, candidate, policy = _issue_ticket(execution_database_path, clock, gateway)
+    service = _consumer(execution_database_path, clock, gateway)
+    try:
+        result = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+    finally:
+        service.close()
+
+    assert result is None
+    assert _row_counts(execution_database_path) == {
+        "approval_tickets": 1,
+        "approval_ticket_events": 2,
+        "order_commands": 0,
+        "submission_claims": 0,
+    }
+    assert gateway.outbound_submissions == []
+    connection = open_sqlite_connection(execution_database_path)
+    try:
+        event_type, event_reason = connection.execute(
+            "SELECT event_type, reason FROM approval_ticket_events "
+            "WHERE ticket_id = ? ORDER BY rowid DESC",
+            (ticket.ticket_id,),
+        ).fetchone()
+        assert (event_type, event_reason) == ("binding_invalidated", "risk_reassessment_rejected")
+        assert reason in {
+            "price_deviation_limit_exceeded",
+            "bid_ask_slippage_limit_exceeded",
+        }
     finally:
         connection.close()
 

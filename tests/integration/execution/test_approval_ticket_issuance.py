@@ -47,7 +47,10 @@ NOW = datetime(2026, 7, 12, 11, 0, tzinfo=UTC)
 
 
 def _gateway(
-    *, accepted: bool = True, positions: tuple[Position, ...] = ()
+    *,
+    accepted: bool = True,
+    positions: tuple[Position, ...] = (),
+    quote: QuoteObservation | None = None,
 ) -> ScriptedEvidenceGateway:
     target = make_execution_target()
     return ScriptedEvidenceGateway(
@@ -60,7 +63,7 @@ def _gateway(
                 positions=positions,
             )
         ],
-        quotes=[QuoteObservation("BTCUSDT", "7999.50", "8000", NOW)],
+        quotes=[quote or QuoteObservation("BTCUSDT", "7999.50", "8000", NOW)],
         server_times=[TimeObservation(server_time=NOW, observed_at=NOW)],
         connections=[TargetConnectionObservation(target, True, NOW)],
         open_orders=[OpenOrderObservation(target, 2, NOW)],
@@ -82,11 +85,13 @@ def _service(ledger: SQLiteExecutionLedger, gateway: ScriptedEvidenceGateway) ->
     )
 
 
-def _propose_and_assess(service: ProposalService):
+def _propose_and_assess(
+    service: ProposalService, *, price: str = "8000", quantity: str = "0.125"
+):
     target = make_execution_target()
     candidate = service.propose(
         make_source_analysis_snapshot(
-            recommendation=make_analysis_recommendation(price="8000", quantity="0.125")
+            recommendation=make_analysis_recommendation(price=price, quantity=quantity)
         ),
         target,
     )
@@ -192,6 +197,54 @@ def test_over_limit_exposure_persists_rejection_without_ticket_or_outbound_side_
     assert [reason.value for reason in assessment.reason_codes] == ["exposure_limit_exceeded"]
     assert audit_facts[-1].kind == "risk_rejected"
     assert audit_facts[-1].reason_code == "exposure_limit_exceeded"
+    assert tickets == ()
+    assert gateway.submit_call_count == 0
+
+    inspection = open_sqlite_connection(execution_database_path)
+    try:
+        assert inspection.execute("SELECT COUNT(*) FROM approval_tickets").fetchone()[0] == 0
+        assert inspection.execute("SELECT COUNT(*) FROM order_commands").fetchone()[0] == 0
+        assert inspection.execute("SELECT COUNT(*) FROM submission_claims").fetchone()[0] == 0
+    finally:
+        inspection.close()
+
+
+@pytest.mark.parametrize(
+    ("price", "quote", "reason"),
+    (
+        (
+            "8080.50",
+            QuoteObservation("BTCUSDT", "7999.50", "8000", NOW),
+            "price_deviation_limit_exceeded",
+        ),
+        (
+            "8000",
+            QuoteObservation("BTCUSDT", "7995.50", "8000", NOW),
+            "bid_ask_slippage_limit_exceeded",
+        ),
+    ),
+)
+def test_over_limit_quote_metrics_persist_rejection_without_ticket_or_outbound_side_effects(
+    execution_database_path,
+    price: str,
+    quote: QuoteObservation,
+    reason: str,
+) -> None:
+    """Adverse selected-target quote metrics cannot cross the ticket boundary."""
+    ledger = SQLiteExecutionLedger(execution_database_path)
+    gateway = _gateway(quote=quote)
+    candidate, assessment = _propose_and_assess(
+        _service(ledger, gateway), price=price, quantity="0.100"
+    )
+    audit_facts = ledger.list_proposal_audit_facts()
+    tickets = ledger.list_approval_tickets()
+    ledger.close()
+
+    assert candidate is not None
+    assert assessment.accepted is False
+    assert [item.value for item in assessment.reason_codes] == [reason]
+    assert audit_facts[-1].kind == "risk_rejected"
+    assert audit_facts[-1].reason_code == reason
     assert tickets == ()
     assert gateway.submit_call_count == 0
 

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from pa_agent.trading.domain.approval import (
     AnalysisRecommendation,
+    CandidateExecutionIntent,
     ExecutionTarget,
     SourceAnalysisSnapshot,
     digest_analysis_recommendation,
@@ -108,3 +109,25 @@ def make_source_analysis_snapshot(**overrides: object) -> SourceAnalysisSnapshot
             values["recommendation"]  # type: ignore[arg-type]
         )
     return SourceAnalysisSnapshot(**values)  # type: ignore[arg-type]
+
+
+def make_candidate_execution_intent(**overrides: object) -> CandidateExecutionIntent:
+    """Build a provenance-bound Paper Spot candidate for risk tests."""
+    snapshot = make_source_analysis_snapshot()
+    recommendation = snapshot.recommendation
+    values: dict[str, object] = {
+        "source_id": snapshot.source_id,
+        "source_completed_at": snapshot.completed_at,
+        "source_schema_version": snapshot.schema_version,
+        "source_parser_version": snapshot.parser_version,
+        "source_decision_digest": snapshot.decision_digest,
+        "target": make_execution_target(),
+        "symbol": recommendation.symbol,
+        "side": recommendation.side,
+        "order_type": recommendation.order_type,
+        "quantity": recommendation.quantity,
+        "price": recommendation.price,
+        "risk_basis": recommendation.risk_basis,
+    }
+    values.update(overrides)
+    return CandidateExecutionIntent(**values)  # type: ignore[arg-type]

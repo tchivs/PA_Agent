@@ -24,6 +24,7 @@ from pa_agent.trading.domain.models import (
     OrderState,
 )
 from pa_agent.trading.domain.risk import EvidenceBundle, RiskAssessment
+from pa_agent.trading.domain.zero_scope_clearance import ZeroScopeClearanceProof
 
 _NONTERMINAL_SUBMISSION_STATES = frozenset(
     {
@@ -227,16 +228,26 @@ class ExecutionLedger(Protocol):
     def count_recovery_assessments(self) -> int:
         """Return recovery clearance rows for boundary-oriented verification only."""
 
-    def begin_kill_switch_recovery(self, actor_label: str, *, assessment_ids: tuple[str, ...]) -> bool:
-        """Move LATCHED to RECOVERING only after exact current-scope assessment verification."""
+    def begin_kill_switch_recovery(
+        self,
+        actor_label: str,
+        *,
+        assessment_ids: tuple[str, ...],
+        zero_scope_proof: ZeroScopeClearanceProof | None = None,
+    ) -> bool:
+        """Move LATCHED only through exact assessments or an ID-free empty-scope proof."""
 
     def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
         """Return each persisted account/product scope needing fresh gateway evidence."""
 
     def complete_kill_switch_recovery(
-        self, actor_label: str, *, assessment_ids: tuple[str, ...]
+        self,
+        actor_label: str,
+        *,
+        assessment_ids: tuple[str, ...],
+        zero_scope_proof: ZeroScopeClearanceProof | None = None,
     ) -> bool:
-        """Return READY only through a separately revalidated scope-ID set."""
+        """Return READY only through separately revalidated current clearance."""
 
     def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
         """Return persisted non-terminal jobs without allocating replacement identities."""

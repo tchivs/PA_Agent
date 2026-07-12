@@ -22,6 +22,7 @@ from pa_agent.trading.domain.models import (
     GatewayEvidence,
     InstrumentRules,
     OrderState,
+    Position,
     ProductType,
     QuoteObservation,
     RuleObservation,
@@ -537,3 +538,119 @@ def test_zero_scope_recovery_requires_two_durable_clearance_proofs_after_reopen(
             assert "recovery_assessment_id" not in proof
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda gateway: setattr(
+            gateway,
+            "get_account_snapshot",
+            lambda account_id, product: (_ for _ in ()).throw(RuntimeError("unavailable")),
+        ),
+        lambda gateway: setattr(
+            gateway,
+            "get_connection",
+            lambda target: TargetConnectionObservation(target, True, NOW - timedelta(seconds=61)),
+        ),
+        lambda gateway: setattr(
+            gateway,
+            "get_server_time",
+            lambda: TimeObservation(NOW + timedelta(seconds=1), NOW + timedelta(seconds=1)),
+        ),
+        lambda gateway: setattr(
+            gateway,
+            "get_account_snapshot",
+            lambda account_id, product: AccountObservation("other-account", product, NOW),
+        ),
+        lambda gateway: setattr(
+            gateway,
+            "get_open_order_count",
+            lambda target: OpenOrderObservation(target, 1, NOW),
+        ),
+        lambda gateway: setattr(
+            gateway,
+            "get_account_snapshot",
+            lambda account_id, product: AccountObservation(
+                account_id,
+                product,
+                NOW,
+                positions=(Position("BTCUSDT", "0.001", "8000", "8000", "0", "0"),),
+            ),
+        ),
+    ],
+    ids=["unavailable", "stale", "future", "account-mismatch", "open-order", "position"],
+)
+def test_zero_scope_invalid_current_facts_preserve_latched_state(
+    execution_database_path: Path, mutation: object
+) -> None:
+    """Every unavailable, stale, mismatched, or exposed fact fails before a state event."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    gateway = _CancellationGateway({})
+    mutation(gateway)
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        before_events = _kill_switch_event_count(execution_database_path)
+        assert service.begin_recovery("operator-1", assessment_ids=()) is False
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
+        assert _kill_switch_event_count(execution_database_path) == before_events
+        assert ledger.count_recovery_assessments() == 0
+        assert gateway.submit_call_count == 0
+    finally:
+        ledger.close()
+
+
+def test_zero_scope_unresolved_local_claim_preserves_latched_state(
+    execution_database_path: Path,
+) -> None:
+    """An empty active scope cannot bypass a concurrent unresolved local claim."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    gateway = _CancellationGateway({})
+    service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+    try:
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        connection = open_sqlite_connection(execution_database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO order_commands(
+                    command_id, logical_command_key, client_order_id, command_json,
+                    mode, product, account_id, symbol, created_at_utc
+                ) VALUES ('local-command', 'local-key', 'local-client', '{}', 'paper', 'spot',
+                          'paper-account', 'BTCUSDT', ?)
+                """,
+                (NOW.isoformat(),),
+            )
+            connection.execute(
+                """
+                INSERT INTO orders(command_id, exchange_order_id, lifecycle_state, filled_quantity,
+                                   filled_notional, evidence_cursor)
+                VALUES ('local-command', NULL, 'submitting', '0', '0', NULL)
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO submission_claims(claim_id, command_id, claim_token, admitted_at_utc, status)
+                VALUES ('local-claim', 'local-command', 'local-token', ?, 'outbound_started')
+                """,
+                (NOW.isoformat(),),
+            )
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
+        assert service.begin_recovery("operator-1", assessment_ids=()) is False
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
+    finally:
+        ledger.close()
+
+
+def _kill_switch_event_count(database_path: Path) -> int:
+    connection = open_sqlite_connection(database_path)
+    try:
+        return int(connection.execute("SELECT COUNT(*) FROM kill_switch_events").fetchone()[0])
+    finally:
+        connection.close()

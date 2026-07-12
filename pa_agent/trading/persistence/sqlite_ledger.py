@@ -59,6 +59,7 @@ from pa_agent.trading.domain.risk import (
     RiskPolicy,
     select_phase2_policy,
 )
+from pa_agent.trading.domain.zero_scope_clearance import ZeroScopeClearanceProof
 from pa_agent.trading.persistence.sqlite_connection import (
     LedgerStorageError,
     bootstrap_sqlite_connection,
@@ -1161,19 +1162,30 @@ class SQLiteExecutionLedger(ExecutionLedger):
             self._require_connection().execute("SELECT COUNT(*) FROM recovery_assessments").fetchone()[0]
         )
 
-    def begin_kill_switch_recovery(self, actor_label: str, *, assessment_ids: tuple[str, ...]) -> bool:
+    def begin_kill_switch_recovery(
+        self,
+        actor_label: str,
+        *,
+        assessment_ids: tuple[str, ...],
+        zero_scope_proof: ZeroScopeClearanceProof | None = None,
+    ) -> bool:
         """Move to RECOVERING only after processed work and normalized terminal evidence."""
         connection = self._require_connection()
         with transaction(connection):
             if not actor_label or self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.LATCHED:
                 return False
-            if (
-                not self._recovery_facts_are_clear_in_transaction()
-                or not self._recovery_assessments_match_current_scopes_in_transaction(assessment_ids)
+            if not self._recovery_facts_are_clear_in_transaction():
+                return False
+            if not self._recovery_clearance_matches_current_scopes_in_transaction(
+                assessment_ids, zero_scope_proof
             ):
                 return False
             self._set_kill_switch_status_in_transaction(
-                KillSwitchStatus.RECOVERING, actor_label, _timestamp_text(self.utc_now()), assessment_ids
+                KillSwitchStatus.RECOVERING,
+                actor_label,
+                _timestamp_text(self.utc_now()),
+                assessment_ids,
+                zero_scope_proof,
             )
             return True
 
@@ -1188,7 +1200,11 @@ class SQLiteExecutionLedger(ExecutionLedger):
         return tuple(_recovery_scope_from_row(row) for row in rows)
 
     def complete_kill_switch_recovery(
-        self, actor_label: str, *, assessment_ids: tuple[str, ...]
+        self,
+        actor_label: str,
+        *,
+        assessment_ids: tuple[str, ...],
+        zero_scope_proof: ZeroScopeClearanceProof | None = None,
     ) -> bool:
         """Return READY only after explicit operator action and a fresh accepted assessment."""
         connection = self._require_connection()
@@ -1197,11 +1213,17 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 not actor_label
                 or self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.RECOVERING
                 or not self._recovery_facts_are_clear_in_transaction()
-                or not self._recovery_assessments_match_current_scopes_in_transaction(assessment_ids)
+                or not self._recovery_clearance_matches_current_scopes_in_transaction(
+                    assessment_ids, zero_scope_proof
+                )
             ):
                 return False
             self._set_kill_switch_status_in_transaction(
-                KillSwitchStatus.READY, actor_label, _timestamp_text(self.utc_now()), assessment_ids
+                KillSwitchStatus.READY,
+                actor_label,
+                _timestamp_text(self.utc_now()),
+                assessment_ids,
+                zero_scope_proof,
             )
             return True
 
@@ -1592,7 +1614,59 @@ class SQLiteExecutionLedger(ExecutionLedger):
             """,
             (OrderState.FILLED.value, OrderState.CANCELLED.value, OrderState.REJECTED.value),
         ).fetchone()[0]
-        return pending_work == 0 and unresolved == 0
+        unresolved_claims = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM submission_claims AS claims
+            JOIN orders ON orders.command_id = claims.command_id
+            WHERE claims.status = 'outbound_started'
+              AND orders.lifecycle_state NOT IN (?, ?, ?)
+            """,
+            (OrderState.FILLED.value, OrderState.CANCELLED.value, OrderState.REJECTED.value),
+        ).fetchone()[0]
+        return pending_work == 0 and unresolved == 0 and unresolved_claims == 0
+
+    def _recovery_clearance_matches_current_scopes_in_transaction(
+        self,
+        assessment_ids: tuple[str, ...],
+        zero_scope_proof: ZeroScopeClearanceProof | None,
+    ) -> bool:
+        """Select the sole admissible clearance form from the transaction-loaded scope set."""
+        active_scope_count = self._require_connection().execute(
+            "SELECT COUNT(*) FROM recovery_scopes WHERE active = 1"
+        ).fetchone()[0]
+        if active_scope_count == 0:
+            return assessment_ids == () and self._zero_scope_proof_matches_current_state_in_transaction(
+                zero_scope_proof
+            )
+        if zero_scope_proof is not None:
+            return False
+        return self._recovery_assessments_match_current_scopes_in_transaction(assessment_ids)
+
+    def _zero_scope_proof_matches_current_state_in_transaction(
+        self, proof: ZeroScopeClearanceProof | None
+    ) -> bool:
+        """Reject forged, stale, malformed, or non-empty ID-free proof facts."""
+        if type(proof) is not ZeroScopeClearanceProof:
+            return False
+        try:
+            canonical_proof = proof.to_canonical_json()
+            if ZeroScopeClearanceProof.from_canonical_json(canonical_proof) != proof:
+                return False
+        except (TypeError, ValueError):
+            return False
+        now = self.utc_now()
+        return all(
+            _is_recovery_timestamp_fresh(observed_at, now)
+            for observed_at in (
+                proof.account.observed_at,
+                proof.open_orders.observed_at,
+                proof.connection.observed_at,
+                proof.server_time.server_time,
+                proof.server_time.observed_at,
+                proof.collected_at,
+            )
+        )
 
     def _replace_recovery_scopes_in_transaction(self, created_at: str) -> None:
         """Snapshot the fixed target/policy set at each latch, never from a recovery caller."""
@@ -1757,6 +1831,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         actor_label: str,
         occurred_at: str,
         recovery_assessment_ids: tuple[str, ...] | None = None,
+        zero_scope_proof: ZeroScopeClearanceProof | None = None,
     ) -> None:
         """Transition the singleton and append a bounded operator audit event."""
         changed = self._require_connection().execute(
@@ -1766,7 +1841,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         if changed.rowcount != 1:
             raise LedgerStorageError("kill switch state is missing")
         self._record_kill_switch_event(
-            status, None, actor_label, occurred_at, recovery_assessment_ids
+            status, None, actor_label, occurred_at, recovery_assessment_ids, zero_scope_proof
         )
 
     def _record_kill_switch_event(
@@ -1776,12 +1851,14 @@ class SQLiteExecutionLedger(ExecutionLedger):
         actor_label: str,
         occurred_at: str,
         recovery_assessment_ids: tuple[str, ...] | None = None,
+        zero_scope_proof: ZeroScopeClearanceProof | None = None,
     ) -> None:
         """Append one bounded safety-state event while an immediate transaction is active."""
         self._require_connection().execute(
             """INSERT INTO kill_switch_events(
-                event_id, status, reason, actor_label, occurred_at_utc, recovery_assessment_ids_json
-            ) VALUES (?, ?, ?, ?, ?, ?)""",
+                event_id, status, reason, actor_label, occurred_at_utc, recovery_assessment_ids_json,
+                zero_scope_clearance_proof_json, zero_scope_clearance_summary
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _new_id("kill-switch-event"),
                 status.value,
@@ -1789,6 +1866,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 actor_label,
                 occurred_at,
                 _canonical_json(recovery_assessment_ids) if recovery_assessment_ids is not None else None,
+                zero_scope_proof.to_canonical_json() if zero_scope_proof is not None else None,
+                zero_scope_proof.clearance_summary if zero_scope_proof is not None else None,
             ),
         )
 

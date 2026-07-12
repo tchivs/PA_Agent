@@ -381,6 +381,12 @@ _RECOVERY_ASSESSMENT_SCHEMA_STATEMENTS = (
 )
 
 
+def _add_zero_scope_clearance_audit_columns(connection: sqlite3.Connection) -> None:
+    """Add nullable ID-free proof facts without rewriting prior safety events."""
+    connection.execute("ALTER TABLE kill_switch_events ADD COLUMN zero_scope_clearance_proof_json TEXT")
+    connection.execute("ALTER TABLE kill_switch_events ADD COLUMN zero_scope_clearance_summary TEXT")
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
@@ -388,4 +394,5 @@ MIGRATIONS = (
     Migration(4, _create_kill_switch_schema),
     Migration(5, _create_outbound_dispatch_schema),
     Migration(6, _create_recovery_assessment_schema),
+    Migration(7, _add_zero_scope_clearance_audit_columns),
 )

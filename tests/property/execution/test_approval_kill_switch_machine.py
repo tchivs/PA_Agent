@@ -1,6 +1,7 @@
 """Property-level checks for the permit-only authorization boundary."""
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -32,6 +33,9 @@ class _ZeroScopeGateway:
         del account_id, product
         return ()
 
+    def get_open_order_count(self, target: object) -> OpenOrderObservation:
+        return OpenOrderObservation(target, 0, _NOW)
+
     def get_connection(self, target: object) -> TargetConnectionObservation:
         return TargetConnectionObservation(target, True, _NOW)
 
@@ -42,9 +46,6 @@ class _ZeroScopeGateway:
 class _Clock:
     def utc_now(self):
         return _NOW
-
-
-from datetime import UTC, datetime
 
 
 _NOW = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)

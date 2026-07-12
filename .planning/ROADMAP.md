@@ -83,7 +83,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/application/intent_factory.py`, `risk_engine.py`, `execution_coordinator.py`, `reconciler.py`, `security/`; extend non-secret settings through `pa_agent/config/settings.py`; integrate from `pa_agent/app_context.py` without adding execution behavior to `pa_agent/gui/main_window.py`, `pa_agent/gui/order_opportunity.py`, or `pa_agent/notify/`.
 **Key risks and gates**: The existing Stage 2 payload and alert pipeline must never receive a submission capability. Product context carries leverage, borrow/repay, margin mode, and position mode; leverage is not a generic order field. Fresh exchange evidence is mandatory before submit, and failed evidence rejects rather than using cached values.
-**Plans**: 12/13 plans executed (1 gap-closure plan pending)
+**Plans**: 13/21 plans complete (8 gap-closure plans pending)
 
 Plans:
 **Wave 1**
@@ -121,7 +121,36 @@ Plans:
 - [x] 02-10-PLAN.md — Enforce the fixed selected-target Paper Spot total-exposure policy in the pure risk engine.
 - [x] 02-11-PLAN.md — Prove excess exposure cannot issue or consume an approval ticket.
 - [x] 02-12-PLAN.md — Block accepted-risk persistence while the durable kill switch is not READY, including after restart.
-- [ ] 02-13-PLAN.md — Enforce price-deviation and bid-ask-slippage limits at ticket issuance and consumption, then repair stale migration-history test expectations.
+- [x] 02-13-PLAN.md — Enforce price-deviation and bid-ask-slippage limits at ticket issuance and consumption, then repair stale migration-history test expectations.
+
+**Gap Closure Wave 1**
+
+- [ ] 02-14-PLAN.md — Correct MARKET side-price economics and Paper Spot SELL base-balance validation.
+- [ ] 02-15-PLAN.md — Route credential, SQLite audit, logs, notifications, and generated records through unified secret-safe output boundaries, with the execution summary enumerating every real producer and its end-to-end scan result.
+
+**Gap Closure Wave 2** *(blocked on 02-14)*
+
+- [ ] 02-16-PLAN.md — Allow only fixed-window T0-to-T0+1 authorization-equivalent refreshes while preserving every D-10 binding.
+
+**Gap Closure Wave 3** *(blocked on 02-16)*
+
+- [ ] 02-17-PLAN.md — Prepare the two-stage opaque dispatch-permit and ledger-lease contract without runtime blocking claims.
+
+**Gap Closure Wave 4** *(blocked on 02-17)*
+
+- [ ] 02-18-PLAN.md — Persist, atomically lease, and enforce one-time outbound verification; directly reject caller-created legacy OutboundSubmission values with zero mutation and zero-call regressions.
+
+**Gap Closure Wave 5** *(blocked on 02-18)*
+
+- [ ] 02-19-PLAN.md — Replace Boolean recovery with dedicated scope-bound recovery assessments whose IDs are allocated only after same-transaction durable-scope identity, target, policy, and digest verification.
+
+**Verification Gap Closure Wave 2** *(blocked on 02-15)*
+
+- [ ] 02-20-PLAN.md — Sanitize unknown structured logging arguments and exceptions before interpolation, then prove the real file-handler output is secret-safe.
+
+**Verification Gap Closure Wave 6** *(blocked on 02-19)*
+
+- [ ] 02-21-PLAN.md — Restrict recovery assessment persistence to complete fresh service-collected observations so fabricated empty assessments cannot obtain IDs or transition the latch.
 
 ### Phase 3: Paper Product Core
 
@@ -240,7 +269,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Execution Foundation | 8/8 | Complete | 2026-07-11 |
-| 2. Approval And Risk Boundary | 12/12 | Complete   | 2026-07-12 |
+| 2. Approval And Risk Boundary | 13/21 | Gap closure planned | - |
 | 3. Paper Product Core | 0/TBD | Not started | - |
 | 4. Local Trading Workspace | 0/TBD | Not started | - |
 | 5. Binance Spot Testnet | 0/TBD | Not started | - |

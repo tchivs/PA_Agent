@@ -146,7 +146,11 @@ class _EvidenceAndSubmissionGateway:
     def get_loss_drawdown(self, target: object) -> object:
         self._record("loss_drawdown")
         return LossDrawdownObservation(
-            target, "99", "0.09", self.observed_at.replace(hour=0), self.observed_at
+            target,
+            "99",
+            "0.09",
+            self.observed_at.replace(hour=0, minute=0, second=0, microsecond=0),
+            self.observed_at,
         )
 
     def get_fee_rate(self, target: object, symbol: str, quote_identifier: str) -> object:

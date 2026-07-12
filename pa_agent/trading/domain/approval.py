@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
@@ -24,6 +24,67 @@ def _canonical_digest(value: object) -> str:
         canonicalize(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+_EVIDENCE_TIMESTAMP_KEYS = frozenset(
+    {
+        "observed_at",
+        "rule_observed_at",
+        "server_time",
+        "window_started_at",
+        "window_ends_at",
+        "utc_day_started_at",
+    }
+)
+_EVIDENCE_NON_AUTHORIZATION_KEYS = _EVIDENCE_TIMESTAMP_KEYS | frozenset({"evidence_digest"})
+_FRESHNESS_TIMESTAMP_KEYS = _EVIDENCE_TIMESTAMP_KEYS - frozenset({"utc_day_started_at"})
+
+
+def _authorization_evidence_material(value: object) -> object:
+    """Remove only raw observation-time fields from canonical evidence material."""
+    if isinstance(value, dict):
+        return {
+            key: _authorization_evidence_material(item)
+            for key, item in value.items()
+            if key not in _EVIDENCE_NON_AUTHORIZATION_KEYS
+        }
+    if isinstance(value, list):
+        return [_authorization_evidence_material(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_authorization_evidence_material(item) for item in value)
+    return value
+
+
+def _evidence_observation_times(value: object) -> tuple[datetime, ...]:
+    """Extract every timestamp that must independently pass freshness validation."""
+    timestamps: list[datetime] = []
+
+    def collect(node: object) -> None:
+        if isinstance(node, dict):
+            for key, item in node.items():
+                if key in _FRESHNESS_TIMESTAMP_KEYS:
+                    if isinstance(item, (str, datetime)):
+                        parsed = datetime.fromisoformat(item) if isinstance(item, str) else item
+                        if parsed.tzinfo is None or parsed.utcoffset() is None:
+                            raise ValueError("authorization evidence timestamps must be timezone-aware")
+                        timestamps.append(parsed.astimezone(UTC))
+                    else:
+                        collect(item)
+                else:
+                    collect(item)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                collect(item)
+
+    collect(canonicalize(value))
+    if not timestamps:
+        raise ValueError("authorization evidence requires observation timestamps")
+    return tuple(timestamps)
+
+
+def authorization_evidence_digest(value: object) -> str:
+    """Digest all evidence facts except raw observation timestamps."""
+    return _canonical_digest(_authorization_evidence_material(canonicalize(value)))
 
 
 @dataclass(frozen=True)
@@ -235,7 +296,9 @@ class TicketBinding:
     evidence_digest: str
     quote_digest: str
     fee_rate_digest: str
+    authorization_evidence_digest: str
     data_age_digest: str
+    observation_timestamps: tuple[datetime, ...]
     venue: str
     environment: str
     account_id: str
@@ -261,6 +324,8 @@ class TicketBinding:
         policy: object,
         evidence_digest: str,
         quote_observed_at: datetime,
+        authorization_evidence_digest: str | None = None,
+        observation_timestamps: tuple[datetime, ...] | None = None,
         fee_estimate: object,
         risk_reason_codes: tuple[object, ...],
         risk_metrics: tuple[tuple[str, Decimal], ...],
@@ -278,6 +343,8 @@ class TicketBinding:
             raise ValueError("ticket binding requires persisted evidence")
         if quote_observed_at.tzinfo is None or quote_observed_at.utcoffset() is None:
             raise ValueError("ticket binding requires an aware quote timestamp")
+        authorization_digest = authorization_evidence_digest or evidence_digest
+        observed_timestamps = observation_timestamps or (quote_observed_at,)
         source_provenance = {
             "source_id": candidate.source_id,
             "completed_at": candidate.source_completed_at.isoformat(),
@@ -306,7 +373,9 @@ class TicketBinding:
             evidence_digest=evidence_digest,
             quote_digest=quote_digest,
             fee_rate_digest=fee_rate_digest,
+            authorization_evidence_digest=authorization_digest,
             data_age_digest=_canonical_digest(quote_observed_at),
+            observation_timestamps=observed_timestamps,
             venue=candidate.target.target_id,
             environment=candidate.target.mode.value,
             account_id=candidate.target.account_id,
@@ -327,6 +396,41 @@ class TicketBinding:
                 reason_codes=tuple(str(reason) for reason in risk_reason_codes),
                 metrics=risk_metrics,
             ),
+        )
+
+    def is_authorization_equivalent_to(
+        self, current: TicketBinding, *, policy: object, now: datetime
+    ) -> bool:
+        """Permit only fresh timestamp refreshes with every D-10 fact unchanged."""
+        from pa_agent.trading.domain.risk import RiskPolicy
+
+        if type(current) is not TicketBinding or type(policy) is not RiskPolicy:
+            return False
+        if now.tzinfo is None or now.utcoffset() is None:
+            return False
+        if (
+            policy.policy_version != "phase2-v1"
+            or policy.policy_digest != self.policy_digest
+            or current.policy_version != policy.policy_version
+            or current.policy_digest != policy.policy_digest
+        ):
+            return False
+        for observed_at in current.observation_timestamps:
+            if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+                return False
+            age = now.astimezone(UTC) - observed_at.astimezone(UTC)
+            if age < timedelta(0) or age > timedelta(seconds=policy.evidence_max_age_seconds):
+                return False
+        ignored_timestamp_fields = {
+            "evidence_digest",
+            "data_age_digest",
+            "data_observed_at",
+            "observation_timestamps",
+        }
+        return all(
+            getattr(self, field.name) == getattr(current, field.name)
+            for field in self.__dataclass_fields__.values()
+            if field.name not in ignored_timestamp_fields
         )
 
 

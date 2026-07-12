@@ -24,6 +24,8 @@ from pa_agent.trading.domain.approval import (
     TicketBinding,
     TicketRiskResult,
     TicketTerminalEvent,
+    _evidence_observation_times,
+    authorization_evidence_digest,
 )
 from pa_agent.trading.domain.errors import (
     ConversionRejectionReason,
@@ -265,6 +267,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
             policy=policy,
             evidence_digest=evidence.evidence_digest,
             quote_observed_at=evidence.quote.observed_at,
+            authorization_evidence_digest=authorization_evidence_digest(evidence),
+            observation_timestamps=_evidence_observation_times(evidence),
             fee_estimate=assessment.fee_estimate,
             risk_reason_codes=assessment.reason_codes,
             risk_metrics=assessment.metrics,
@@ -290,7 +294,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     ticket, TicketTerminalEvent.EXPIRED, "approval_ticket_expired"
                 )
                 return None
-            if ticket.binding != fresh_binding:
+            if not ticket.binding.is_authorization_equivalent_to(
+                fresh_binding, policy=policy, now=self.utc_now()
+            ):
                 self._terminate_ticket_in_transaction(
                     ticket,
                     TicketTerminalEvent.BINDING_INVALIDATED,
@@ -298,6 +304,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     fresh_binding,
                 )
                 return None
+            self._record_current_refresh_audit(candidate, evidence, assessment)
             consumed = connection.execute(
                 "UPDATE approval_tickets SET status = ? WHERE ticket_id = ? AND status = ?",
                 (ApprovalTicketStatus.CONSUMED.value, ticket_id, ApprovalTicketStatus.PENDING.value),
@@ -1284,6 +1291,96 @@ class SQLiteExecutionLedger(ExecutionLedger):
         )
         return terminal
 
+    def _record_current_refresh_audit(
+        self,
+        candidate: CandidateExecutionIntent,
+        evidence: EvidenceBundle,
+        assessment: RiskAssessment,
+    ) -> None:
+        """Append the exact successful refresh facts inside the consume transaction."""
+        connection = self._require_connection()
+        snapshot_digest = self._candidate_snapshot_digest(candidate)
+        now = _timestamp_text(self.utc_now())
+        evidence_json = self._safe_canonical_json(canonicalize(evidence))
+        inserted = connection.execute(
+            """
+            INSERT OR IGNORE INTO proposal_evidence(
+                evidence_digest, intent_digest, evidence_json, observed_at_utc, recorded_at_utc
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                evidence.evidence_digest,
+                candidate.intent_digest,
+                evidence_json,
+                _timestamp_text(evidence.quote.observed_at),
+                now,
+            ),
+        )
+        if inserted.rowcount:
+            self._append_proposal_audit_fact(
+                kind="evidence_recorded",
+                source_id=candidate.source_id,
+                source_digest=candidate.intent_digest,
+                snapshot_digest=snapshot_digest,
+                intent_digest=candidate.intent_digest,
+                policy_digest=None,
+                evidence_digest=evidence.evidence_digest,
+                reason_code=None,
+                fee_amount=None,
+                observed_at=_timestamp_text(evidence.quote.observed_at),
+                recorded_at=now,
+                summary={
+                    "target_id": candidate.target.target_id,
+                    "symbol": candidate.symbol,
+                    "quote_identifier": evidence.fee_rate.quote_identifier,
+                    "fee_rate_version": evidence.fee_rate.rate_version,
+                },
+            )
+        fee_amount = decimal_to_canonical(assessment.fee_estimate.amount)
+        reason_codes = tuple(reason.value for reason in assessment.reason_codes)
+        connection.execute(
+            """
+            INSERT INTO proposal_risk_assessments(
+                assessment_id, intent_digest, accepted, policy_version, policy_digest,
+                evidence_digest, reason_codes_json, fee_amount, assessment_json,
+                observed_at_utc, recorded_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("proposal-assessment"),
+                candidate.intent_digest,
+                1,
+                assessment.policy_version,
+                assessment.policy_digest,
+                assessment.evidence_digest,
+                _canonical_json(reason_codes),
+                fee_amount,
+                self._safe_canonical_json(canonicalize(assessment)),
+                now,
+                now,
+            ),
+        )
+        self._append_proposal_audit_fact(
+            kind="risk_assessed",
+            source_id=candidate.source_id,
+            source_digest=candidate.intent_digest,
+            snapshot_digest=snapshot_digest,
+            intent_digest=candidate.intent_digest,
+            policy_digest=assessment.policy_digest,
+            evidence_digest=assessment.evidence_digest,
+            reason_code=reason_codes[0] if reason_codes else None,
+            fee_amount=fee_amount,
+            observed_at=now,
+            recorded_at=now,
+            summary={
+                "accepted": True,
+                "policy_version": assessment.policy_version,
+                "reason_codes": reason_codes,
+                "fee_rate_version": assessment.fee_estimate.rate_version,
+                "quote_identifier": assessment.fee_estimate.quote_identifier,
+            },
+        )
+
     def _load_ticket_for_binding(
         self, candidate: CandidateExecutionIntent, assessment: RiskAssessment
     ) -> ApprovalTicket | None:
@@ -1701,6 +1798,8 @@ def _ticket_binding_from_persisted_json(
             policy=policy,
             evidence_digest=assessment.evidence_digest,
             quote_observed_at=_timestamp_from_text(quote["observed_at"]),
+            authorization_evidence_digest=authorization_evidence_digest(evidence),
+            observation_timestamps=_evidence_observation_times(evidence),
             fee_estimate=fee,
             risk_reason_codes=assessment.reason_codes,
             risk_metrics=assessment.metrics,
@@ -1724,7 +1823,11 @@ def _ticket_from_row(row: tuple[object, ...]) -> ApprovalTicket:
             evidence_digest=binding_data["evidence_digest"],
             quote_digest=binding_data["quote_digest"],
             fee_rate_digest=binding_data["fee_rate_digest"],
+            authorization_evidence_digest=binding_data["authorization_evidence_digest"],
             data_age_digest=binding_data["data_age_digest"],
+            observation_timestamps=tuple(
+                _timestamp_from_text(value) for value in binding_data["observation_timestamps"]
+            ),
             venue=binding_data["venue"],
             environment=binding_data["environment"],
             account_id=binding_data["account_id"],

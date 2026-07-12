@@ -243,10 +243,63 @@ class CancellationWork:
 
 @dataclass(frozen=True)
 class RecoveryScope:
-    """The persisted account/product scope that must be freshly re-evidenced."""
+    """An immutable ledger-loaded scope eligible for recovery clearance only."""
 
-    account_id: str
-    product: ProductType
+    persistent_scope_id: str
+    target: ExecutionTarget
+    target_digest: str
+    policy_version: str
+    policy_digest: str
+    scope_digest: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.persistent_scope_id,
+                self.target_digest,
+                self.policy_version,
+                self.policy_digest,
+                self.scope_digest,
+            )
+        ):
+            raise ValueError("recovery scope requires durable identity and immutable bindings")
+
+
+@dataclass(frozen=True)
+class RecoveryAssessment:
+    """A clearance fact that cannot represent proposal or outbound authority."""
+
+    recovery_assessment_id: str | None
+    persistent_scope_id: str
+    scope_digest: str
+    target_digest: str
+    policy_version: str
+    policy_digest: str
+    evidence_digest: str
+    evidence_json: str
+    accepted: bool
+    reason_codes: tuple[str, ...]
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.persistent_scope_id,
+                self.scope_digest,
+                self.target_digest,
+                self.policy_version,
+                self.policy_digest,
+                self.evidence_digest,
+                self.evidence_json,
+            )
+        ):
+            raise ValueError("recovery assessment requires complete scope, policy, and evidence facts")
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("recovery assessment time must be timezone-aware")
+        if self.accepted and self.reason_codes:
+            raise ValueError("accepted recovery assessment cannot carry rejection reasons")
+        if not self.accepted and not self.reason_codes:
+            raise ValueError("rejected recovery assessment requires a controlled reason")
 
 
 @dataclass(frozen=True)

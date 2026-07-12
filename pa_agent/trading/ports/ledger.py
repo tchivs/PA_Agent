@@ -11,6 +11,7 @@ from pa_agent.trading.domain.approval import (
     CandidateExecutionIntent,
     ExecutionTarget,
     KillSwitchState,
+    RecoveryAssessment,
     RecoveryScope,
     SourceAnalysisSnapshot,
     TicketBinding,
@@ -280,14 +281,24 @@ class ExecutionLedger(Protocol):
     def record_cancellation_work_result(self, work_id: str, outcome: str) -> CancellationWork:
         """Record an attempted cancellation request without claiming it resolved exposure."""
 
-    def begin_kill_switch_recovery(self, actor_label: str) -> bool:
-        """Move LATCHED to RECOVERING only after durable work and claims are clear."""
+    def record_recovery_assessment(
+        self, scope: RecoveryScope | None, assessment: RecoveryAssessment
+    ) -> RecoveryAssessment | None:
+        """Persist only a scope-identity-verified recovery clearance record."""
+
+    def count_recovery_assessments(self) -> int:
+        """Return recovery clearance rows for boundary-oriented verification only."""
+
+    def begin_kill_switch_recovery(self, actor_label: str, *, assessment_ids: tuple[str, ...]) -> bool:
+        """Move LATCHED to RECOVERING only after exact current-scope assessment verification."""
 
     def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
         """Return each persisted account/product scope needing fresh gateway evidence."""
 
-    def complete_kill_switch_recovery(self, actor_label: str, *, assessment_accepted: bool) -> bool:
-        """Return READY only through explicit operator confirmation after fresh assessment."""
+    def complete_kill_switch_recovery(
+        self, actor_label: str, *, assessment_ids: tuple[str, ...]
+    ) -> bool:
+        """Return READY only through a separately revalidated scope-ID set."""
 
 
     def mark_submission_ambiguous(

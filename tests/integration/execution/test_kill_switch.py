@@ -145,7 +145,7 @@ def test_reset_requires_processed_work_fresh_evidence_and_explicit_operator_acti
 
     recovery = RecoveryService(ledger=ledger, gateway=gateway)
     recovery.recover_startup()
-    assert service.begin_recovery("operator-1", assessment_accepted=True) is False
+    assert service.begin_recovery("operator-1", assessment_ids=("forged-assessment-id",)) is False
 
     gateway.set_evidence(
         client_order_id,
@@ -157,10 +157,13 @@ def test_reset_requires_processed_work_fresh_evidence_and_explicit_operator_acti
         ),
     )
     recovery.recover_startup()
-    assert service.begin_recovery("operator-1", assessment_accepted=True) is True
+    scope = ledger.list_kill_switch_recovery_scopes()[0]
+    persisted = ledger.record_recovery_assessment(scope, _recovery_assessment_for(scope))
+    assert persisted is not None
+    assert service.begin_recovery("operator-1", assessment_ids=(persisted.recovery_assessment_id,)) is True
     assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
-    assert service.complete_recovery("operator-1", assessment_accepted=False) is False
-    assert service.complete_recovery("operator-1", assessment_accepted=True) is True
+    assert service.complete_recovery("operator-1", assessment_ids=("forged-assessment-id",)) is False
+    assert service.complete_recovery("operator-1", assessment_ids=(persisted.recovery_assessment_id,)) is True
     assert ledger.get_kill_switch_state().status is KillSwitchStatus.READY
     ledger.close()
 

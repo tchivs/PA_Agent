@@ -10,3 +10,8 @@
 
 - The uncommitted `tests/integration/execution/test_idempotency_recovery.py` asserts the schema migration history ends at version 3. Plan 02-06 correctly adds the ascending version 4 kill-switch migration, so its two bootstrap assertions now fail only because they omit `(4, 1)`.
 - The same file contains concurrent uncommitted Phase 1 work. It was intentionally left untouched and unstaged; its owner should update the expected migration sequence when reconciling that work.
+
+## 2026-07-12: Repository-wide Ruff baseline remains outside Plan 02-20
+
+- `.venv/bin/ruff check .` reports 4484 existing violations across unrelated legacy modules and utility scripts, predominantly `RUF001`/`RUF003` non-ASCII punctuation findings.
+- Plan 02-20's scoped Ruff command passes for the redactor, formatter, and integration regression. Repository-wide cleanup remains deferred to a dedicated linting task to avoid unrelated changes in this security fix.

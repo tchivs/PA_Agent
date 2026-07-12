@@ -83,7 +83,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/application/intent_factory.py`, `risk_engine.py`, `execution_coordinator.py`, `reconciler.py`, `security/`; extend non-secret settings through `pa_agent/config/settings.py`; integrate from `pa_agent/app_context.py` without adding execution behavior to `pa_agent/gui/main_window.py`, `pa_agent/gui/order_opportunity.py`, or `pa_agent/notify/`.
 **Key risks and gates**: The existing Stage 2 payload and alert pipeline must never receive a submission capability. Product context carries leverage, borrow/repay, margin mode, and position mode; leverage is not a generic order field. Fresh exchange evidence is mandatory before submit, and failed evidence rejects rather than using cached values.
-**Plans**: 13/21 plans complete (8 gap-closure plans pending)
+**Plans**: 21/22 plans complete (1 verification gap-closure plan pending)
 
 Plans:
 **Wave 1**
@@ -151,6 +151,10 @@ Plans:
 **Verification Gap Closure Wave 6** *(blocked on 02-19)*
 
 - [ ] 02-21-PLAN.md — Restrict recovery assessment persistence to complete fresh service-collected observations so fabricated empty assessments cannot obtain IDs or transition the latch.
+
+**Verification Gap Closure Wave 7** *(blocked on 02-21)*
+
+- [ ] 02-22-PLAN.md — Revalidate every canonical recovery observation inside the callable SQLite recorder so forged nonempty JSON cannot mint a clearance ID or reset the latch.
 
 ### Phase 3: Paper Product Core
 

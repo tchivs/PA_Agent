@@ -58,7 +58,7 @@ coverage:
     human_judgment: false
 
 metrics:
-  duration: 35 min
+  duration: 12 min
   completed: 2026-07-12
 status: complete
 ---
@@ -69,9 +69,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 35 min
+- **Duration:** 12 min
 - **Started:** 2026-07-12T10:56:04Z
-- **Completed:** 2026-07-12T11:31:00Z
+- **Completed:** 2026-07-12T11:08:41Z
 - **Tasks:** 2/2
 - **Files modified:** 6
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+import json
 from pathlib import Path
 
 import pytest
@@ -326,6 +328,112 @@ def test_caller_built_empty_assessment_has_no_persistence_path_or_authority(
         assert gateway.submit_call_count == 0
     finally:
         ledger.close()
+
+
+def test_callable_recorder_rejects_forged_or_stale_canonical_evidence_before_id_allocation(
+    execution_database_path: Path,
+) -> None:
+    """A caller cannot mint recovery clearance from a real scope and plausible JSON."""
+    clock = _Clock()
+    ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    try:
+        client_order_id = _create_open_order(ledger)
+        gateway = _CancellationGateway(
+            {
+                client_order_id: GatewayEvidence(
+                    evidence_id="cancelled-before-forgery",
+                    client_order_id=client_order_id,
+                    state=OrderState.CANCELLED,
+                    observed_at=NOW,
+                )
+            }
+        )
+        service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
+        service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
+        service.process_cancellation_work()
+        RecoveryService(ledger=ledger, gateway=gateway).recover_startup()
+        scope = ledger.list_kill_switch_recovery_scopes()[0]
+        baseline = _authorization_row_counts(execution_database_path)
+
+        fabricated_evidence = {
+            name: {"fabricated": f"{name}-observation"}
+            for name in (
+                "capabilities",
+                "rules",
+                "account",
+                "quote",
+                "server_time",
+                "connection",
+                "open_orders",
+                "order_rate",
+                "loss_drawdown",
+                "fee_rate",
+            )
+        }
+        fabricated_json = json.dumps(
+            fabricated_evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        forged = _accepted_recovery_assessment(scope, fabricated_json)
+
+        assert ledger._record_recovery_assessment_from_service(scope, forged) is None
+        assert _authorization_row_counts(execution_database_path) == baseline
+        assert not service.begin_recovery("operator-1", assessment_ids=("forged-assessment-id",))
+        assert not service.complete_recovery("operator-1", assessment_ids=("forged-assessment-id",))
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
+        assert gateway.submit_call_count == 0
+
+        controlled = RecoveryAssessmentService(
+            ledger=ledger, gateway=gateway, utc_now=clock.utc_now
+        ).assess(scope)
+        assert controlled.accepted
+        stale_evidence = json.loads(controlled.evidence_json)
+        stale_evidence["quote"]["observed_at"] = (NOW - timedelta(seconds=61)).isoformat()
+        stale_json = json.dumps(stale_evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        stale = _accepted_recovery_assessment(scope, stale_json)
+
+        assert ledger._record_recovery_assessment_from_service(scope, stale) is None
+        assert _authorization_row_counts(execution_database_path) == baseline
+        assert not service.begin_recovery("operator-1", assessment_ids=("stale-assessment-id",))
+        assert not service.complete_recovery("operator-1", assessment_ids=("stale-assessment-id",))
+        assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED
+        assert gateway.submit_call_count == 0
+    finally:
+        ledger.close()
+
+
+def _accepted_recovery_assessment(scope: object, evidence_json: str) -> RecoveryAssessment:
+    """Build a caller-supplied accepted value with real durable scope bindings."""
+    return RecoveryAssessment(
+        recovery_assessment_id=None,
+        persistent_scope_id=scope.persistent_scope_id,
+        scope_digest=scope.scope_digest,
+        target_digest=scope.target_digest,
+        policy_version=scope.policy_version,
+        policy_digest=scope.policy_digest,
+        evidence_digest=sha256(evidence_json.encode("utf-8")).hexdigest(),
+        evidence_json=evidence_json,
+        accepted=True,
+        reason_codes=(),
+        observed_at=NOW,
+    )
+
+
+def _authorization_row_counts(database_path: Path) -> dict[str, int]:
+    connection = open_sqlite_connection(database_path)
+    try:
+        return {
+            table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in (
+                "recovery_assessments",
+                "proposal_risk_assessments",
+                "approval_tickets",
+                "order_commands",
+                "submission_claims",
+                "outbound_dispatch_attempts",
+            )
+        }
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize(

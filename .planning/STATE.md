@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: approval-and-risk-boundary
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-07-12T10:53:14.855Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-07-12T11:31:00Z"
 last_activity: 2026-07-12
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 17
-  completed_plans: 12
-  percent: 71
+  completed_plans: 13
+  percent: 76
 ---
 
 # Project State
@@ -29,30 +29,30 @@ See: `.planning/PROJECT.md` (updated 2026-07-11)
 ## Current Position
 
 Phase: 02 (approval-and-risk-boundary) - EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-07-12 - Phase 02 execution started
 
-Progress: [███████░░░] 71%
+Progress: [████████░░] 76%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 12
-- Average duration: 6 min
-- Total execution time: 0.6 hours
+- Total plans completed: 13
+- Average duration: 8 min
+- Total execution time: 1.2 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01. Execution Foundation | 4 | 29 min | 7 min |
-| 02. Approval And Risk Boundary | 4 | 21 min | 5 min |
+| 02. Approval And Risk Boundary | 5 | 56 min | 11 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 02-01 (6 min), 02-02 (5 min), 02-03 (4 min), 02-04 (6 min)
+- Last 5 plans: 02-01 (6 min), 02-02 (5 min), 02-03 (4 min), 02-04 (6 min), 02-05 (35 min)
 - Trend: Stable
 
 | Phase 01 P03 | 8 min | 2 tasks | 8 files |
@@ -65,6 +65,7 @@ Progress: [███████░░░] 71%
 | Phase 02 P02 | 5 min | 2 tasks | 8 files |
 | Phase 02 P03 | 4 min | 2 tasks | 6 files |
 | Phase 02 P04 | 6 min | 2 tasks | 8 files |
+| Phase 02 P05 | 35 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 02]: phase2-v1 binds only paper-spot-primary Paper Spot policy and rejects alternate targets.
 - [Phase 02]: RiskEngine is pure and returns digest-bound reason-coded assessments from target-bound evidence.
 - [Phase 02]: FreshEvidenceCollector refreshes all target-scoped evidence in fixed order and returns only canonical reason-coded failures.
+- [Phase 02]: ProposalService persists controlled candidate, rejection, evidence, fee, and risk facts before ticket issuance; the audit port has no consumption or outbound authority.
 
 ### Pending Todos
 
@@ -108,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-12T10:53:14.845Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-07-12T11:31:00Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None

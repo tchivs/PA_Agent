@@ -664,12 +664,13 @@ def test_expired_and_restart_reloaded_permits_cannot_dispatch(
     finally:
         service.close()
 
+    restart_database_path = execution_database_path.with_name("restart.sqlite3")
     fresh_clock = _Clock(NOW)
     fresh_gateway = _EvidenceAndSubmissionGateway()
     fresh_ticket, fresh_candidate, fresh_policy = _issue_ticket(
-        execution_database_path, fresh_clock, fresh_gateway
+        restart_database_path, fresh_clock, fresh_gateway
     )
-    fresh_service = _consumer(execution_database_path, fresh_clock, fresh_gateway)
+    fresh_service = _consumer(restart_database_path, fresh_clock, fresh_gateway)
     try:
         fresh_permit = fresh_service.consume_ticket(
             fresh_ticket.ticket_id, fresh_candidate, fresh_candidate.target, fresh_policy
@@ -680,7 +681,7 @@ def test_expired_and_restart_reloaded_permits_cannot_dispatch(
         fresh_service.close()
 
     reopened_gateway = _EvidenceAndSubmissionGateway()
-    reopened_ledger = SQLiteExecutionLedger(execution_database_path, clock=fresh_clock)
+    reopened_ledger = SQLiteExecutionLedger(restart_database_path, clock=fresh_clock)
     try:
         with pytest.raises(LedgerStorageError):
             SubmissionCoordinator(ledger=reopened_ledger, gateway=reopened_gateway).submit(fresh_permit)

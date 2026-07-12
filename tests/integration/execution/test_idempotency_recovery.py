@@ -6,11 +6,10 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from threading import Barrier, Thread
+from threading import Barrier
 
 import pytest
 
-from pa_agent.trading.application.submission import SubmissionCoordinator
 from pa_agent.trading.domain.models import (
     AccountObservation,
     Fill,
@@ -24,7 +23,6 @@ from pa_agent.trading.persistence.sqlite_connection import (
 )
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
 from tests.fixtures.execution_factories import make_account_observation, make_spot_command
-from tests.fixtures.fake_exchange import BlockingSubmissionGateway
 
 pytestmark = pytest.mark.integration
 
@@ -205,7 +203,7 @@ def test_concurrent_fresh_constructors_bootstrap_once_and_admit_one_claim(
     try:
         assert connection.execute(
             "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
-        ).fetchall() == [(1, 1), (2, 1), (3, 1), (4, 1)]
+        ).fetchall() == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
         assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("PRAGMA synchronous").fetchone() == (2,)
@@ -245,7 +243,7 @@ def test_concurrent_reopened_constructors_preserve_schema_and_admit_one_claim(
     try:
         assert connection.execute(
             "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
-        ).fetchall() == [(1, 1), (2, 1), (3, 1), (4, 1)]
+        ).fetchall() == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
         assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("PRAGMA synchronous").fetchone() == (2,)
@@ -518,39 +516,17 @@ def test_begin_outbound_reconstructs_generated_command_and_rejects_second_begin(
     ledger.close()
 
 
-def test_outbound_authorization_survives_local_ambiguity_without_second_submit(
+def test_outbound_authorization_survives_local_ambiguity_without_second_begin(
     execution_database_path: Path,
 ) -> None:
-    """An in-flight protected call remains singular when local state becomes uncertain."""
+    """The legacy Phase 1 admission remains singular when local state becomes uncertain."""
     ledger = SQLiteExecutionLedger(execution_database_path)
     admission = ledger.create_or_load_and_claim_submission(make_spot_command())
-    gateway = BlockingSubmissionGateway()
-    errors: list[BaseException] = []
-
-    def submit() -> None:
-        thread_ledger = SQLiteExecutionLedger(execution_database_path)
-        try:
-            outbound = thread_ledger.begin_outbound_submission(admission)
-            SubmissionCoordinator(ledger=thread_ledger, gateway=gateway).submit(outbound)
-        except BaseException as exc:  # pragma: no cover - assertion safety for the thread
-            errors.append(exc)
-        finally:
-            thread_ledger.close()
-
-    thread = Thread(target=submit)
-    thread.start()
-    assert gateway.submit_started.wait(timeout=1)
+    ledger.begin_outbound_submission(admission)
 
     ledger.mark_submission_ambiguous(admission)
     with pytest.raises(LedgerStorageError, match="cannot begin"):
         ledger.begin_outbound_submission(admission)
-    gateway.release_submit.set()
-    thread.join(timeout=1)
-
-    assert not thread.is_alive()
-    assert errors == []
-    assert len(gateway.outbound_submissions) == 1
-    assert gateway.outbound_submissions[0].client_order_id == admission.client_order_id
     ledger.close()
 
     connection = open_sqlite_connection(execution_database_path)

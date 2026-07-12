@@ -206,14 +206,14 @@ def test_gateway_submission_requires_the_protected_outbound_authorization() -> N
     assert "ledger-created" in gateway_contract
 
 
-def test_ticket_consumption_contract_prepares_a_permit_not_forgery_blocking() -> None:
-    """Contract preparation keeps consumption proof separate from gateway authority."""
+def test_ticket_consumption_contract_persists_a_permit_not_gateway_authority() -> None:
+    """Consumption returns a durable proof while retaining the gateway value in the ledger."""
     hints = get_type_hints(ExecutionLedger.consume_valid_ticket_and_begin_outbound)
     contract = ExecutionLedger.consume_valid_ticket_and_begin_outbound.__doc__ or ""
 
     assert hints["return"] == OutboundDispatchPermit | None
-    assert "contract preparation" in contract.lower()
-    assert "future ledger implementation" in contract.lower()
+    assert "persist" in contract.lower()
+    assert "proof" in contract.lower()
 
     permit_fields = {field.name: get_type_hints(OutboundDispatchPermit)[field.name] for field in fields(OutboundDispatchPermit)}
     assert permit_fields == {
@@ -237,7 +237,7 @@ def test_ticket_consumption_contract_prepares_a_permit_not_forgery_blocking() ->
     )
 
 
-def test_ledger_lease_contract_is_the_only_future_gateway_value_source() -> None:
+def test_ledger_lease_contract_is_the_only_gateway_value_source() -> None:
     """A durable lease is the sole source of a gateway-facing value."""
     assert get_type_hints(ExecutionLedger.lease_outbound_submission) == {
         "permit": OutboundDispatchPermit,

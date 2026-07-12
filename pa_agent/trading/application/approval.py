@@ -20,7 +20,7 @@ from pa_agent.trading.domain.approval import (
     TicketTerminalEvent,
 )
 from pa_agent.trading.domain.risk import RiskAssessment, RiskPolicy
-from pa_agent.trading.ports.ledger import ExecutionLedger, OutboundSubmission
+from pa_agent.trading.ports.ledger import ExecutionLedger, OutboundDispatchPermit
 
 
 class ApprovalService:
@@ -73,8 +73,8 @@ class ApprovalService:
         candidate: CandidateExecutionIntent,
         target: ExecutionTarget,
         policy: RiskPolicy,
-    ) -> OutboundSubmission | None:
-        """Refresh every fact and atomically convert one current ticket to outbound authority."""
+    ) -> OutboundDispatchPermit | None:
+        """Refresh every fact and atomically convert one current ticket to a dispatch permit."""
         if self._evidence_collector is None or self._risk_engine is None:
             raise RuntimeError("ticket consumption requires fresh evidence and risk dependencies")
         ticket = next((item for item in self._ledger.list_approval_tickets() if item.ticket_id == ticket_id), None)

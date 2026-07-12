@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pa_agent.trading.domain.models import GatewayEvidence
 from pa_agent.trading.ports.gateway import TradingGateway
-from pa_agent.trading.ports.ledger import ExecutionLedger, OutboundSubmission
+from pa_agent.trading.ports.ledger import ExecutionLedger, OutboundDispatchPermit
 
 
 class SubmissionCoordinator:
@@ -18,10 +18,11 @@ class SubmissionCoordinator:
         self._ledger = ledger
         self._gateway = gateway
 
-    def submit(self, outbound: OutboundSubmission) -> GatewayEvidence:
-        """Perform the single gateway call already authorized by the ledger."""
-        if type(outbound) is not OutboundSubmission:
-            raise TypeError("submission coordinator accepts only ledger-produced outbound submissions")
+    def submit(self, permit: OutboundDispatchPermit) -> GatewayEvidence:
+        """Lease one permit, then make the sole gateway call with the rebuilt value."""
+        if type(permit) is not OutboundDispatchPermit:
+            raise TypeError("submission coordinator accepts only dispatch permits")
+        outbound = self._ledger.lease_outbound_submission(permit)
         try:
             return self._gateway.submit_order(outbound)
         except Exception:

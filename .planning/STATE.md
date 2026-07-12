@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: approval-and-risk-boundary
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-07-12T10:33:30.628Z"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-07-12T10:43:21.593Z"
 last_activity: 2026-07-12
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 17
-  completed_plans: 10
-  percent: 59
+  completed_plans: 11
+  percent: 65
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-11)
 ## Current Position
 
 Phase: 02 (approval-and-risk-boundary) — EXECUTING
-Plan: 3 of 8
+Plan: 4 of 8
 Status: Ready to execute
 Last activity: 2026-07-12 — Phase 02 execution started
 
-Progress: [██████░░░░] 59%
+Progress: [███████░░░] 65%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [██████░░░░] 59%
 | Phase 01 P08 | 5 min | 2 tasks | 5 files |
 | Phase 02 P01 | 6 min | 2 tasks | 8 files |
 | Phase 02 P02 | 5 min | 2 tasks | 8 files |
+| Phase 02 P03 | 4 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 02]: Only explicit Paper Spot targets may produce candidates; target changes and frozen source provenance are included in the candidate digest, while conversion has no gateway, ledger, or submission authority.
 - [Phase 02]: Credential references are opaque metadata; withdrawal declarations fail before execution consumers receive credentials.
 - [Phase 02]: Trading settings persist only Paper Spot `phase2-v1` metadata and an optional credential reference; secret-like fields are rejected.
+- [Phase 02]: phase2-v1 binds only paper-spot-primary Paper Spot policy and rejects alternate targets. — D-08 requires exact mode, account, product, and symbol policy binding.
+- [Phase 02]: RiskEngine is pure and returns digest-bound reason-coded assessments from target-bound evidence. — Risk judgments cannot obtain gateway, ledger, GUI, notification, or submission authority.
 
 ### Pending Todos
 
@@ -110,6 +113,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-12T10:33:30.628Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-07-12T10:43:21.587Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None

@@ -215,7 +215,7 @@ def test_ticket_consumption_contract_prepares_a_permit_not_forgery_blocking() ->
     assert "contract preparation" in contract.lower()
     assert "future ledger implementation" in contract.lower()
 
-    permit_fields = {field.name: field.type for field in fields(OutboundDispatchPermit)}
+    permit_fields = {field.name: get_type_hints(OutboundDispatchPermit)[field.name] for field in fields(OutboundDispatchPermit)}
     assert permit_fields == {
         "command_id": str,
         "client_order_id": str,

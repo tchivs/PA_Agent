@@ -101,6 +101,33 @@ class OutboundSubmission:
 
 
 @dataclass(frozen=True)
+class OutboundDispatchPermit:
+    """Opaque durable identities and proof awaiting a future ledger lease.
+
+    This is contract preparation only: callers may hold or reconstruct a
+    lookalike permit, so it does not block forgery by itself. Only the future
+    ledger implementation may verify the persisted proof and rebuild the
+    gateway-facing :class:`OutboundSubmission`.
+    """
+
+    command_id: str
+    client_order_id: str
+    reconciliation_job_id: str
+    outbound_attempt_proof: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.command_id,
+                self.client_order_id,
+                self.reconciliation_job_id,
+                self.outbound_attempt_proof,
+            )
+        ):
+            raise ValueError("outbound dispatch permit requires durable identities and opaque proof")
+
+
+@dataclass(frozen=True)
 class ReconciliationJob:
     """Persisted recovery identity for one non-terminal command."""
 
@@ -173,8 +200,24 @@ class ExecutionLedger(Protocol):
         policy: object,
         evidence: EvidenceBundle,
         assessment: RiskAssessment,
-    ) -> OutboundSubmission | None:
-        """Atomically consume one current ticket into its only outbound authority."""
+    ) -> OutboundDispatchPermit | None:
+        """Prepare one dispatch permit from a current ticket, not gateway authority.
+
+        This is contract preparation, not forged-input blocking. The future
+        ledger implementation must atomically mint and persist the opaque proof
+        during ticket consumption; only that future ledger implementation may
+        transform the permit into a gateway-facing value.
+        """
+
+    def lease_outbound_submission(self, permit: OutboundDispatchPermit) -> OutboundSubmission:
+        """Lease one gateway submission after one-time durable proof verification.
+
+        The future ledger implementation must verify the permit's persisted
+        identity and proof in one transaction, use a conditional rowcount check
+        to consume its one-time lease, then reconstruct the canonical command.
+        This contract alone does not block forged permits before that durable
+        implementation exists.
+        """
 
     def mark_outbound_submission_ambiguous(self, outbound: OutboundSubmission) -> None:
         """Record local ambiguity for an already-authorized outbound submission."""

@@ -25,7 +25,7 @@ class KillSwitchService:
         self._gateway = gateway
         self._utc_now = utc_now
         self._recovery_assessment_service = recovery_assessment_service or RecoveryAssessmentService(
-            gateway=gateway, utc_now=utc_now
+            ledger=ledger, gateway=gateway, utc_now=utc_now
         )
 
     def latch(
@@ -73,9 +73,7 @@ class KillSwitchService:
             persisted_ids: list[str] = []
             try:
                 for scope in self._ledger.list_kill_switch_recovery_scopes():
-                    persisted = self._ledger.record_recovery_assessment(
-                        scope, self._recovery_assessment_service.assess(scope)
-                    )
+                    persisted = self._recovery_assessment_service.assess_and_record(scope)
                     if persisted is None or persisted.recovery_assessment_id is None:
                         return False
                     persisted_ids.append(persisted.recovery_assessment_id)

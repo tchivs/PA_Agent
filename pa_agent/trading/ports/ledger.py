@@ -11,7 +11,6 @@ from pa_agent.trading.domain.approval import (
     CandidateExecutionIntent,
     ExecutionTarget,
     KillSwitchState,
-    RecoveryAssessment,
     RecoveryScope,
     SourceAnalysisSnapshot,
     TicketBinding,
@@ -280,11 +279,6 @@ class ExecutionLedger(Protocol):
 
     def record_cancellation_work_result(self, work_id: str, outcome: str) -> CancellationWork:
         """Record an attempted cancellation request without claiming it resolved exposure."""
-
-    def record_recovery_assessment(
-        self, scope: RecoveryScope | None, assessment: RecoveryAssessment
-    ) -> RecoveryAssessment | None:
-        """Persist only a scope-identity-verified recovery clearance record."""
 
     def count_recovery_assessments(self) -> int:
         """Return recovery clearance rows for boundary-oriented verification only."""

@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from pa_agent.trading.application.kill_switch import KillSwitchService
-from pa_agent.trading.application.recovery_assessment import RecoveryAssessmentService
 from pa_agent.trading.application.recovery import RecoveryService
+from pa_agent.trading.application.recovery_assessment import RecoveryAssessmentService
 from pa_agent.trading.domain.approval import (
     KillSwitchStatus,
     RecoveryAssessment,
@@ -333,7 +333,7 @@ def test_caller_built_empty_assessment_has_no_persistence_path_or_authority(
     [
         lambda gateway, scope: setattr(gateway, "get_quote", lambda symbol: object()),
         lambda gateway, scope: setattr(gateway, "get_connection", lambda target: TargetConnectionObservation(scope.target, True, NOW - timedelta(seconds=61))),
-        lambda gateway, scope: setattr(gateway, "get_fee_rate", lambda target, symbol, quote: FeeRateObservation(scope.target, symbol, quote, "USDT", "0.001", "fees-v1", NOW)),
+        lambda gateway, scope: setattr(gateway, "get_fee_rate", lambda target, symbol, quote: FeeRateObservation(replace(scope.target, account_id="other-account"), symbol, quote, "USDT", "0.001", "fees-v1", NOW)),
         lambda gateway, scope: setattr(gateway, "get_open_order_count", lambda target: (_ for _ in ()).throw(RuntimeError("unavailable"))),
     ],
     ids=["malformed", "stale", "cross-target", "unavailable"],
@@ -357,9 +357,7 @@ def test_invalid_controlled_observations_cannot_allocate_accepted_recovery_autho
             ledger=ledger, gateway=gateway, utc_now=clock.utc_now
         ).assess_and_record(scope)
 
-        assert assessment is not None
-        assert assessment.accepted is False
-        assert assessment.recovery_assessment_id is None
+        assert assessment is None
         assert ledger.count_recovery_assessments() == 0
         assert not service.begin_recovery("operator-1", assessment_ids=("forged-assessment-id",))
         assert ledger.get_kill_switch_state().status is KillSwitchStatus.LATCHED

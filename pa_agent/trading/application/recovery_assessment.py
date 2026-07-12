@@ -7,9 +7,37 @@ from datetime import UTC, datetime
 from hashlib import sha256
 
 from pa_agent.trading.domain.approval import RecoveryAssessment, RecoveryScope
-from pa_agent.trading.domain.models import canonicalize
-from pa_agent.trading.domain.risk import select_phase2_policy
+from pa_agent.trading.domain.models import (
+    AccountObservation,
+    GatewayCapabilities,
+    QuoteObservation,
+    RuleObservation,
+    TimeObservation,
+    canonicalize,
+)
+from pa_agent.trading.domain.risk import (
+    FeeRateObservation,
+    LossDrawdownObservation,
+    OpenOrderObservation,
+    OrderRateObservation,
+    TargetConnectionObservation,
+    select_phase2_policy,
+)
 from pa_agent.trading.ports.gateway import TradingGateway
+from pa_agent.trading.ports.ledger import ExecutionLedger
+
+_RECOVERY_OBSERVATION_TYPES = {
+    "capabilities": GatewayCapabilities,
+    "rules": RuleObservation,
+    "account": AccountObservation,
+    "quote": QuoteObservation,
+    "server_time": TimeObservation,
+    "connection": TargetConnectionObservation,
+    "open_orders": OpenOrderObservation,
+    "order_rate": OrderRateObservation,
+    "loss_drawdown": LossDrawdownObservation,
+    "fee_rate": FeeRateObservation,
+}
 
 
 class RecoveryAssessmentService:
@@ -18,9 +46,11 @@ class RecoveryAssessmentService:
     def __init__(
         self,
         *,
+        ledger: ExecutionLedger,
         gateway: TradingGateway,
         utc_now: Callable[[], datetime],
     ) -> None:
+        self._ledger = ledger
         self._gateway = gateway
         self._utc_now = utc_now
 
@@ -58,11 +88,20 @@ class RecoveryAssessmentService:
                 reasons.append(f"{name}_unavailable")
         account = observations.get("account")
         open_orders = observations.get("open_orders")
-        if account is not None and any(position.quantity != 0 for position in account.positions):
+        if type(account) is AccountObservation and any(position.quantity != 0 for position in account.positions):
             reasons.append("unresolved_position")
-        if open_orders is not None and open_orders.count != 0:
+        if type(open_orders) is OpenOrderObservation and open_orders.count != 0:
             reasons.append("unresolved_open_orders")
-        evidence_json = _canonical_json(observations)
+        reasons.extend(self._observation_rejection_reasons(scope, symbol, observations, now))
+        try:
+            evidence_json = _canonical_json(observations)
+        except (TypeError, ValueError):
+            return self._rejected(
+                scope,
+                "evidence_malformed",
+                {"observation_names": sorted(observations)},
+                now.astimezone(UTC),
+            )
         return RecoveryAssessment(
             recovery_assessment_id=None,
             persistent_scope_id=scope.persistent_scope_id,
@@ -76,6 +115,83 @@ class RecoveryAssessmentService:
             reason_codes=tuple(dict.fromkeys(reasons)),
             observed_at=now.astimezone(UTC),
         )
+
+    def assess_and_record(self, scope: RecoveryScope) -> RecoveryAssessment | None:
+        """Collect and durably record one service-owned recovery audit fact.
+
+        The public ledger port deliberately has no matching method.  The narrow
+        SQLite entry point remains private to this service so a caller-held
+        ``RecoveryAssessment`` cannot request an identity allocation.
+        """
+        assessment = self.assess(scope)
+        if not assessment.accepted:
+            return None
+        recorder = getattr(self._ledger, "_record_recovery_assessment_from_service", None)
+        if not callable(recorder):
+            raise TypeError("recovery ledger does not support controlled recording")
+        return recorder(scope, assessment)
+
+    @staticmethod
+    def _observation_rejection_reasons(
+        scope: RecoveryScope,
+        symbol: str,
+        observations: dict[str, object],
+        now: datetime,
+    ) -> list[str]:
+        """Reject non-canonical, cross-target, or stale evidence before persistence."""
+        reasons: list[str] = []
+        if set(observations) != set(_RECOVERY_OBSERVATION_TYPES):
+            missing = sorted(set(_RECOVERY_OBSERVATION_TYPES) - set(observations))
+            reasons.extend(f"{name}_unavailable" for name in missing)
+            return reasons
+        for name, expected_type in _RECOVERY_OBSERVATION_TYPES.items():
+            observation = observations[name]
+            if type(observation) is not expected_type:
+                reasons.append(f"{name}_malformed")
+                continue
+            if name == "capabilities":
+                continue
+            observed_at = (
+                observation.window_ends_at if name == "order_rate" else observation.observed_at
+            )
+            if not _is_fresh(observed_at, now):
+                reasons.append(f"{name}_stale")
+        capabilities = observations.get("capabilities")
+        rules = observations.get("rules")
+        account = observations.get("account")
+        quote = observations.get("quote")
+        connection = observations.get("connection")
+        open_orders = observations.get("open_orders")
+        order_rate = observations.get("order_rate")
+        loss_drawdown = observations.get("loss_drawdown")
+        fee_rate = observations.get("fee_rate")
+        if type(capabilities) is GatewayCapabilities and scope.target.product not in capabilities.products:
+            reasons.append("capabilities_target_mismatch")
+        if type(rules) is RuleObservation and rules.rules.symbol != symbol:
+            reasons.append("rules_symbol_mismatch")
+        if type(account) is AccountObservation and (
+            account.account_id != scope.target.account_id or account.product is not scope.target.product
+        ):
+            reasons.append("account_target_mismatch")
+        if type(quote) is QuoteObservation and quote.symbol != symbol:
+            reasons.append("quote_symbol_mismatch")
+        for name, observation in (
+            ("connection", connection),
+            ("open_orders", open_orders),
+            ("order_rate", order_rate),
+            ("loss_drawdown", loss_drawdown),
+        ):
+            if observation is not None and type(observation) is _RECOVERY_OBSERVATION_TYPES[name] and observation.target != scope.target:
+                reasons.append(f"{name}_target_mismatch")
+        if type(connection) is TargetConnectionObservation and not connection.connected:
+            reasons.append("connection_unavailable")
+        if type(fee_rate) is FeeRateObservation and (
+            fee_rate.target != scope.target
+            or fee_rate.symbol != symbol
+            or fee_rate.quote_identifier != symbol
+        ):
+            reasons.append("fee_rate_target_mismatch")
+        return reasons
 
     @staticmethod
     def _rejected(
@@ -103,3 +219,11 @@ def _canonical_json(value: object) -> str:
 
 def _digest(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
+
+
+def _is_fresh(observed_at: datetime, now: datetime) -> bool:
+    """Apply the recovery-specific fixed 60-second evidence window."""
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        return False
+    age_seconds = (now.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds()
+    return 0 <= age_seconds <= 60

@@ -1265,10 +1265,10 @@ class SQLiteExecutionLedger(ExecutionLedger):
             ).fetchone()
             return CancellationWork(*row)
 
-    def record_recovery_assessment(
-        self, scope: RecoveryScope | None, assessment: RecoveryAssessment
+    def _record_recovery_assessment_from_service(
+        self, scope: RecoveryScope, assessment: RecoveryAssessment
     ) -> RecoveryAssessment | None:
-        """Mint an ID only after the asserted scope matches the active durable row."""
+        """Private service-only recorder for complete, fresh recovery evidence."""
         if type(scope) is not RecoveryScope or type(assessment) is not RecoveryAssessment:
             return None
         connection = self._require_connection()
@@ -1283,6 +1283,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 or assessment.policy_version != scope.policy_version
                 or assessment.policy_digest != scope.policy_digest
                 or assessment.recovery_assessment_id is not None
+                or not assessment.accepted
+                or assessment.reason_codes
+                or not _is_recovery_timestamp_fresh(assessment.observed_at, self.utc_now())
                 or not self._recovery_evidence_is_complete(assessment.evidence_json, assessment.evidence_digest)
             ):
                 return None
@@ -1859,12 +1862,14 @@ class SQLiteExecutionLedger(ExecutionLedger):
             "loss_drawdown",
             "fee_rate",
         }
-        return (
-            isinstance(evidence, dict)
-            and required_observations.issubset(evidence)
-            and _canonical_json(evidence) == evidence_json
-            and _digest_text(evidence_json) == evidence_digest
-        )
+        if (
+            not isinstance(evidence, dict)
+            or set(evidence) != required_observations
+            or _canonical_json(evidence) != evidence_json
+            or _digest_text(evidence_json) != evidence_digest
+        ):
+            return False
+        return all(isinstance(evidence[name], dict) and evidence[name] for name in required_observations)
 
     def _recovery_assessments_match_current_scopes_in_transaction(
         self, assessment_ids: tuple[str, ...]
@@ -2145,6 +2150,14 @@ def _timestamp_from_text(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise LedgerStorageError("stored audit timestamp is not timezone-aware")
     return parsed.astimezone(UTC)
+
+
+def _is_recovery_timestamp_fresh(observed_at: datetime, now: datetime) -> bool:
+    """Return whether a recovery fact remains inside its fixed 60-second window."""
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        return False
+    age_seconds = (now.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds()
+    return 0 <= age_seconds <= 60
 
 
 def _ticket_binding_from_persisted_json(

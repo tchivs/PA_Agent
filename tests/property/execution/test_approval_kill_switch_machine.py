@@ -7,12 +7,20 @@ from tempfile import TemporaryDirectory
 
 import pytest
 from hypothesis import settings as h_settings
-from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule, run_state_machine_as_test
+from hypothesis.stateful import (
+    RuleBasedStateMachine,
+    invariant,
+    precondition,
+    rule,
+    run_state_machine_as_test,
+)
 
 from pa_agent.trading.application.kill_switch import KillSwitchService
 from pa_agent.trading.domain.approval import KillSwitchStatus
-from pa_agent.trading.domain.models import GatewayEvidence, OrderState
-from pa_agent.trading.persistence.sqlite_connection import LedgerStorageError, open_sqlite_connection
+from pa_agent.trading.persistence.sqlite_connection import (
+    LedgerStorageError,
+    open_sqlite_connection,
+)
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
 from tests.fixtures.execution_factories import make_spot_command
 from tests.fixtures.fake_exchange import ReconciliationOnlyGateway

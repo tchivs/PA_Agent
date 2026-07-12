@@ -14,8 +14,12 @@ from uuid import uuid4
 from pa_agent.trading.domain.approval import (
     ApprovalTicket,
     ApprovalTicketStatus,
+    CancellationWork,
     CandidateExecutionIntent,
     ExecutionTarget,
+    KillSwitchState,
+    KillSwitchStatus,
+    RecoveryScope,
     SourceAnalysisSnapshot,
     TicketBinding,
     TicketRiskResult,
@@ -101,6 +105,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         """Atomically create the first command records or reload a non-admissible repeat."""
         connection = self._require_connection()
         with transaction(connection):
+            self._require_ready_in_transaction()
             existing = self._load_admission(command.logical_command_key)
             if existing is not None:
                 return existing
@@ -192,6 +197,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
             raise LedgerStorageError("cannot begin outbound submission without an admitted claim")
         connection = self._require_connection()
         with transaction(connection):
+            self._require_ready_in_transaction()
             row = connection.execute(
                 """
                 SELECT commands.command_json, commands.client_order_id, jobs.job_id,
@@ -262,6 +268,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         )
         connection = self._require_connection()
         with transaction(connection):
+            self._require_ready_in_transaction()
             row = connection.execute(
                 """
                 SELECT ticket_id, binding_json, status, created_at_utc, expires_at_utc,
@@ -920,6 +927,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
             raise LedgerStorageError("only accepted assessments with fee evidence can issue tickets")
         connection = self._require_connection()
         with transaction(connection):
+            self._require_ready_in_transaction()
             existing = self._load_ticket_for_binding(candidate, assessment)
             if existing is not None:
                 return existing
@@ -1002,6 +1010,178 @@ class SQLiteExecutionLedger(ExecutionLedger):
             """
         ).fetchall()
         return tuple(_ticket_from_row(row) for row in rows)
+
+    def get_kill_switch_state(self) -> KillSwitchState:
+        """Load the durable singleton state, which defaults fail-closed after a latch."""
+        return self._load_kill_switch_state_in_transaction()
+
+    def latch_kill_switch(
+        self,
+        *,
+        reason: str,
+        actor_label: str,
+        policy_summary: str,
+        evidence_summary: str,
+        cancellation_supported: bool,
+    ) -> KillSwitchState:
+        """Atomically latch, revoke pending review, and enqueue eligible cancellation work."""
+        if not all((reason, actor_label, policy_summary, evidence_summary)):
+            raise ValueError("kill switch latch requires controlled reason, actor, policy, and evidence")
+        connection = self._require_connection()
+        with transaction(connection):
+            current = self._load_kill_switch_state_in_transaction()
+            if current.status is KillSwitchStatus.LATCHED:
+                return current
+            now = _timestamp_text(self.utc_now())
+            connection.execute(
+                """
+                INSERT INTO kill_switch_state(
+                    singleton_id, status, reason, actor_label, policy_summary, evidence_summary, changed_at_utc
+                ) VALUES (1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    status = excluded.status, reason = excluded.reason, actor_label = excluded.actor_label,
+                    policy_summary = excluded.policy_summary, evidence_summary = excluded.evidence_summary,
+                    changed_at_utc = excluded.changed_at_utc
+                """,
+                (KillSwitchStatus.LATCHED.value, reason, actor_label, policy_summary, evidence_summary, now),
+            )
+            self._record_kill_switch_event(KillSwitchStatus.LATCHED, reason, actor_label, now)
+            pending_rows = connection.execute(
+                """
+                SELECT ticket_id, binding_json, status, created_at_utc, expires_at_utc,
+                       terminal_event, terminal_reason, terminal_at_utc
+                FROM approval_tickets WHERE status = ?
+                """,
+                (ApprovalTicketStatus.PENDING.value,),
+            ).fetchall()
+            for row in pending_rows:
+                self._terminate_ticket_in_transaction(
+                    _ticket_from_row(row), TicketTerminalEvent.KILL_SWITCH_REVOKED, "kill_switch_latched"
+                )
+            if cancellation_supported:
+                for command_id, client_order_id in connection.execute(
+                    """
+                    SELECT commands.command_id, commands.client_order_id
+                    FROM order_commands AS commands JOIN orders ON orders.command_id = commands.command_id
+                    WHERE orders.lifecycle_state IN (?, ?, ?)
+                    """,
+                    (OrderState.ACKNOWLEDGED.value, OrderState.OPEN.value, OrderState.PARTIALLY_FILLED.value),
+                ).fetchall():
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO cancellation_work(
+                            work_id, command_id, client_order_id, status, request_outcome,
+                            remote_resolution, created_at_utc, processed_at_utc
+                        ) VALUES (?, ?, ?, 'queued', NULL, NULL, ?, NULL)
+                        """,
+                        (_new_id("cancellation-work"), command_id, client_order_id, now),
+                    )
+            return KillSwitchState(
+                KillSwitchStatus.LATCHED, reason, actor_label, policy_summary, evidence_summary,
+                _timestamp_from_text(now),
+            )
+
+    def list_cancellation_work(self, *, pending_only: bool = False) -> tuple[CancellationWork, ...]:
+        """Load cancellation request rows without treating them as remote lifecycle evidence."""
+        query = """
+            SELECT work_id, command_id, client_order_id, status, request_outcome, remote_resolution
+            FROM cancellation_work
+        """
+        if pending_only:
+            query += " WHERE status = 'queued'"
+        query += " ORDER BY created_at_utc, work_id"
+        return tuple(CancellationWork(*row) for row in self._require_connection().execute(query).fetchall())
+
+    def record_cancellation_work_result(self, work_id: str, outcome: str) -> CancellationWork:
+        """Record an attempted cancellation request without claiming it resolved exposure."""
+        if outcome not in {"requested", "timeout"}:
+            raise ValueError("cancellation request outcome must be requested or timeout")
+        connection = self._require_connection()
+        with transaction(connection):
+            command_row = connection.execute(
+                """
+                SELECT work.command_id, orders.lifecycle_state
+                FROM cancellation_work AS work JOIN orders ON orders.command_id = work.command_id
+                WHERE work.work_id = ? AND work.status = 'queued'
+                """,
+                (work_id,),
+            ).fetchone()
+            if command_row is None:
+                raise LedgerStorageError("cancellation work is no longer queued")
+            command_id, lifecycle_state = command_row
+            previous_state = OrderState(lifecycle_state)
+            if previous_state in {
+                OrderState.ACKNOWLEDGED,
+                OrderState.OPEN,
+                OrderState.PARTIALLY_FILLED,
+            }:
+                requested_state = assert_transition(
+                    previous_state, LifecycleEvent.CANCELLATION_REQUESTED
+                )
+                self._append_event(
+                    command_id=command_id,
+                    previous_state=previous_state,
+                    new_state=requested_state,
+                    event=LifecycleEvent.CANCELLATION_REQUESTED,
+                    occurred_at=_timestamp_text(self.utc_now()),
+                    detail={"source": "kill_switch", "outcome": outcome},
+                )
+                connection.execute(
+                    "UPDATE orders SET lifecycle_state = ? WHERE command_id = ?",
+                    (requested_state.value, command_id),
+                )
+            changed = connection.execute(
+                """
+                UPDATE cancellation_work SET status = 'processed', request_outcome = ?, processed_at_utc = ?
+                WHERE work_id = ? AND status = 'queued'
+                """,
+                (outcome, _timestamp_text(self.utc_now()), work_id),
+            )
+            if changed.rowcount != 1:
+                raise LedgerStorageError("cancellation work is no longer queued")
+            row = connection.execute(
+                """
+                SELECT work_id, command_id, client_order_id, status, request_outcome, remote_resolution
+                FROM cancellation_work WHERE work_id = ?
+                """,
+                (work_id,),
+            ).fetchone()
+            return CancellationWork(*row)
+
+    def begin_kill_switch_recovery(self, actor_label: str) -> bool:
+        """Move to RECOVERING only after processed work and normalized terminal evidence."""
+        connection = self._require_connection()
+        with transaction(connection):
+            if not actor_label or self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.LATCHED:
+                return False
+            if not self._recovery_facts_are_clear_in_transaction():
+                return False
+            self._set_kill_switch_status_in_transaction(KillSwitchStatus.RECOVERING, actor_label, _timestamp_text(self.utc_now()))
+            return True
+
+    def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
+        """Return account/product pairs from durable commands without accepting caller scope."""
+        rows = self._require_connection().execute(
+            "SELECT DISTINCT account_id, product FROM order_commands ORDER BY account_id, product"
+        ).fetchall()
+        try:
+            return tuple(RecoveryScope(account_id=row[0], product=ProductType(row[1])) for row in rows)
+        except ValueError as exc:
+            raise LedgerStorageError("stored recovery scope product is invalid") from exc
+
+    def complete_kill_switch_recovery(self, actor_label: str, *, assessment_accepted: bool) -> bool:
+        """Return READY only after explicit operator action and a fresh accepted assessment."""
+        connection = self._require_connection()
+        with transaction(connection):
+            if (
+                not actor_label
+                or not assessment_accepted
+                or self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.RECOVERING
+                or not self._recovery_facts_are_clear_in_transaction()
+            ):
+                return False
+            self._set_kill_switch_status_in_transaction(KillSwitchStatus.READY, actor_label, _timestamp_text(self.utc_now()))
+            return True
 
     def terminate_approval_ticket(
         self,
@@ -1279,6 +1459,70 @@ class SQLiteExecutionLedger(ExecutionLedger):
             lifecycle_state=state,
             is_admissible=False,
             claim_token=None,
+        )
+
+    def _require_ready_in_transaction(self) -> None:
+        """Fail closed at every durable path that could create outbound authority."""
+        if self._load_kill_switch_state_in_transaction().status is not KillSwitchStatus.READY:
+            raise LedgerStorageError("kill switch is not ready for new authorization")
+
+    def _load_kill_switch_state_in_transaction(self) -> KillSwitchState:
+        """Read the singleton under the caller's immediate transaction."""
+        row = self._require_connection().execute(
+            """
+            SELECT status, reason, actor_label, policy_summary, evidence_summary, changed_at_utc
+            FROM kill_switch_state WHERE singleton_id = 1
+            """
+        ).fetchone()
+        if row is None:
+            return KillSwitchState(KillSwitchStatus.READY)
+        try:
+            return KillSwitchState(
+                status=KillSwitchStatus(row[0]),
+                reason=row[1],
+                actor_label=row[2],
+                policy_summary=row[3],
+                evidence_summary=row[4],
+                changed_at=_timestamp_from_text(row[5]),
+            )
+        except ValueError as exc:
+            raise LedgerStorageError("stored kill switch state is invalid") from exc
+
+    def _recovery_facts_are_clear_in_transaction(self) -> bool:
+        """Check only persisted work and normalized evidence, never request outcomes."""
+        connection = self._require_connection()
+        pending_work = connection.execute(
+            "SELECT COUNT(*) FROM cancellation_work WHERE status != 'processed'"
+        ).fetchone()[0]
+        unresolved = connection.execute(
+            """
+            SELECT COUNT(*) FROM orders
+            WHERE lifecycle_state NOT IN (?, ?, ?)
+            """,
+            (OrderState.FILLED.value, OrderState.CANCELLED.value, OrderState.REJECTED.value),
+        ).fetchone()[0]
+        return pending_work == 0 and unresolved == 0
+
+    def _set_kill_switch_status_in_transaction(
+        self, status: KillSwitchStatus, actor_label: str, occurred_at: str
+    ) -> None:
+        """Transition the singleton and append a bounded operator audit event."""
+        changed = self._require_connection().execute(
+            "UPDATE kill_switch_state SET status = ?, actor_label = ?, changed_at_utc = ? WHERE singleton_id = 1",
+            (status.value, actor_label, occurred_at),
+        )
+        if changed.rowcount != 1:
+            raise LedgerStorageError("kill switch state is missing")
+        self._record_kill_switch_event(status, None, actor_label, occurred_at)
+
+    def _record_kill_switch_event(
+        self, status: KillSwitchStatus, reason: str | None, actor_label: str, occurred_at: str
+    ) -> None:
+        """Append one bounded safety-state event while an immediate transaction is active."""
+        self._require_connection().execute(
+            """INSERT INTO kill_switch_events(event_id, status, reason, actor_label, occurred_at_utc)
+            VALUES (?, ?, ?, ?, ?)""",
+            (_new_id("kill-switch-event"), status.value, reason, actor_label, occurred_at),
         )
 
     def _append_event(

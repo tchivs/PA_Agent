@@ -270,8 +270,52 @@ _APPROVAL_TICKET_SCHEMA_STATEMENTS = (
 )
 
 
+def _create_kill_switch_schema(connection: sqlite3.Connection) -> None:
+    """Create singleton safety state plus append-only cancellation request work."""
+    for statement in _KILL_SWITCH_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+
+
+_KILL_SWITCH_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE kill_switch_state (
+        singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+        status TEXT NOT NULL,
+        reason TEXT,
+        actor_label TEXT,
+        policy_summary TEXT,
+        evidence_summary TEXT,
+        changed_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE kill_switch_events (
+        event_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        reason TEXT,
+        actor_label TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE cancellation_work (
+        work_id TEXT PRIMARY KEY,
+        command_id TEXT NOT NULL UNIQUE REFERENCES order_commands(command_id),
+        client_order_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        request_outcome TEXT,
+        remote_resolution TEXT,
+        created_at_utc TEXT NOT NULL,
+        processed_at_utc TEXT
+    )
+    """,
+    "CREATE INDEX cancellation_work_status_idx ON cancellation_work(status, created_at_utc)",
+)
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
     Migration(3, _create_approval_ticket_schema),
+    Migration(4, _create_kill_switch_schema),
 )

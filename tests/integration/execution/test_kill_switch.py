@@ -10,8 +10,17 @@ import pytest
 from pa_agent.trading.application.kill_switch import KillSwitchService
 from pa_agent.trading.application.recovery import RecoveryService
 from pa_agent.trading.domain.approval import KillSwitchStatus
-from pa_agent.trading.domain.models import GatewayEvidence, OrderState
-from pa_agent.trading.persistence.sqlite_connection import LedgerStorageError, open_sqlite_connection
+from pa_agent.trading.domain.models import (
+    AccountObservation,
+    GatewayCapabilities,
+    GatewayEvidence,
+    OrderState,
+    ProductType,
+)
+from pa_agent.trading.persistence.sqlite_connection import (
+    LedgerStorageError,
+    open_sqlite_connection,
+)
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
 from tests.fixtures.execution_factories import make_spot_command
 from tests.fixtures.fake_exchange import ReconciliationOnlyGateway
@@ -42,6 +51,20 @@ class _CancellationGateway(ReconciliationOnlyGateway):
         if evidence is None:
             raise TimeoutError("cancellation response unavailable")
         return evidence
+
+    def get_capabilities(self) -> GatewayCapabilities:
+        return GatewayCapabilities(
+            products=frozenset({ProductType.SPOT}),
+            supports_order_lookup=True,
+            supports_cancellation=True,
+        )
+
+    def get_account_snapshot(self, account_id: str, product: ProductType) -> AccountObservation:
+        return AccountObservation(account_id=account_id, product=product, observed_at=NOW)
+
+    def list_open_orders(self, account_id: str, product: ProductType) -> tuple[object, ...]:
+        del account_id, product
+        return ()
 
 
 def _create_open_order(ledger: SQLiteExecutionLedger) -> str:
@@ -79,8 +102,9 @@ def test_latch_survives_reopen_records_work_and_never_infers_remote_cancel(
     )
 
     assert latched.status is KillSwitchStatus.LATCHED
-    assert gateway.cancelled_client_ids == [client_order_id]
+    assert gateway.cancelled_client_ids == []
     assert service.process_cancellation_work()[0].request_outcome == "timeout"
+    assert gateway.cancelled_client_ids == [client_order_id]
     ledger.close()
 
     reopened = SQLiteExecutionLedger(execution_database_path, clock=clock)
@@ -117,7 +141,7 @@ def test_reset_requires_processed_work_fresh_evidence_and_explicit_operator_acti
 
     recovery = RecoveryService(ledger=ledger, gateway=gateway)
     recovery.recover_startup()
-    assert service.begin_recovery("operator-1") is False
+    assert service.begin_recovery("operator-1", assessment_accepted=True) is False
 
     gateway.set_evidence(
         client_order_id,
@@ -129,7 +153,7 @@ def test_reset_requires_processed_work_fresh_evidence_and_explicit_operator_acti
         ),
     )
     recovery.recover_startup()
-    assert service.begin_recovery("operator-1") is True
+    assert service.begin_recovery("operator-1", assessment_accepted=True) is True
     assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
     assert service.complete_recovery("operator-1", assessment_accepted=False) is False
     assert service.complete_recovery("operator-1", assessment_accepted=True) is True

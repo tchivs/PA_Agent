@@ -7,8 +7,11 @@ from typing import Protocol, runtime_checkable
 
 from pa_agent.trading.domain.approval import (
     ApprovalTicket,
+    CancellationWork,
     CandidateExecutionIntent,
     ExecutionTarget,
+    KillSwitchState,
+    RecoveryScope,
     SourceAnalysisSnapshot,
     TicketBinding,
     TicketTerminalEvent,
@@ -220,6 +223,35 @@ class ExecutionLedger(Protocol):
         binding: TicketBinding | None = None,
     ) -> ApprovalTicket:
         """Append one distinct terminal ticket event using the persisted immutable binding."""
+
+    def get_kill_switch_state(self) -> KillSwitchState:
+        """Return the singleton durable authorization state, defaulting only to READY."""
+
+    def latch_kill_switch(
+        self,
+        *,
+        reason: str,
+        actor_label: str,
+        policy_summary: str,
+        evidence_summary: str,
+        cancellation_supported: bool,
+    ) -> KillSwitchState:
+        """Atomically latch, revoke pending tickets, and enqueue eligible work."""
+
+    def list_cancellation_work(self, *, pending_only: bool = False) -> tuple[CancellationWork, ...]:
+        """Return durable cancellation work without inferring a remote outcome."""
+
+    def record_cancellation_work_result(self, work_id: str, outcome: str) -> CancellationWork:
+        """Record an attempted cancellation request without claiming it resolved exposure."""
+
+    def begin_kill_switch_recovery(self, actor_label: str) -> bool:
+        """Move LATCHED to RECOVERING only after durable work and claims are clear."""
+
+    def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
+        """Return each persisted account/product scope needing fresh gateway evidence."""
+
+    def complete_kill_switch_recovery(self, actor_label: str, *, assessment_accepted: bool) -> bool:
+        """Return READY only through explicit operator confirmation after fresh assessment."""
 
 
     def mark_submission_ambiguous(

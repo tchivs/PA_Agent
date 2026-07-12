@@ -129,6 +129,7 @@ class ApprovalTicketStatus(StrEnum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     INVALIDATED = "invalidated"
+    REVOKED = "revoked"
 
 
 class TicketTerminalEvent(StrEnum):
@@ -137,6 +138,47 @@ class TicketTerminalEvent(StrEnum):
     OPERATOR_REJECTED = "operator_rejected"
     EXPIRED = "expired"
     BINDING_INVALIDATED = "binding_invalidated"
+    KILL_SWITCH_REVOKED = "kill_switch_revoked"
+
+
+class KillSwitchStatus(StrEnum):
+    """The one durable global execution authorization state."""
+
+    READY = "ready"
+    LATCHED = "latched"
+    RECOVERING = "recovering"
+
+
+@dataclass(frozen=True)
+class KillSwitchState:
+    """Persisted operator safety state without any gateway capability."""
+
+    status: KillSwitchStatus
+    reason: str | None = None
+    actor_label: str | None = None
+    policy_summary: str | None = None
+    evidence_summary: str | None = None
+    changed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class CancellationWork:
+    """A durable cancellation request, deliberately separate from remote outcome evidence."""
+
+    work_id: str
+    command_id: str
+    client_order_id: str
+    status: str
+    request_outcome: str | None
+    remote_resolution: str | None
+
+
+@dataclass(frozen=True)
+class RecoveryScope:
+    """The persisted account/product scope that must be freshly re-evidenced."""
+
+    account_id: str
+    product: ProductType
 
 
 @dataclass(frozen=True)
@@ -372,6 +414,7 @@ class ApprovalTicket:
             TicketTerminalEvent.OPERATOR_REJECTED: ApprovalTicketStatus.REJECTED,
             TicketTerminalEvent.EXPIRED: ApprovalTicketStatus.EXPIRED,
             TicketTerminalEvent.BINDING_INVALIDATED: ApprovalTicketStatus.INVALIDATED,
+            TicketTerminalEvent.KILL_SWITCH_REVOKED: ApprovalTicketStatus.REVOKED,
         }
         return replace(
             self,

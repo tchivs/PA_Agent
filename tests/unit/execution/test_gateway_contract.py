@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC
+from dataclasses import fields
 from inspect import getmembers, isabstract, signature
 from typing import Any, get_type_hints
 
@@ -36,7 +37,7 @@ from pa_agent.trading.ports.gateway import (
     TradingGateway,
     TradingGatewayError,
 )
-from pa_agent.trading.ports.ledger import SubmissionAdmission
+from pa_agent.trading.ports.ledger import OutboundDispatchPermit, SubmissionAdmission
 from tests.fixtures.execution_factories import make_account_observation, make_spot_command
 
 
@@ -203,6 +204,54 @@ def test_gateway_submission_requires_the_protected_outbound_authorization() -> N
 
     assert "irreversible" in gateway_contract
     assert "ledger-created" in gateway_contract
+
+
+def test_ticket_consumption_contract_prepares_a_permit_not_forgery_blocking() -> None:
+    """Contract preparation keeps consumption proof separate from gateway authority."""
+    hints = get_type_hints(ExecutionLedger.consume_valid_ticket_and_begin_outbound)
+    contract = ExecutionLedger.consume_valid_ticket_and_begin_outbound.__doc__ or ""
+
+    assert hints["return"] == OutboundDispatchPermit | None
+    assert "contract preparation" in contract.lower()
+    assert "future ledger implementation" in contract.lower()
+
+    permit_fields = {field.name: field.type for field in fields(OutboundDispatchPermit)}
+    assert permit_fields == {
+        "command_id": str,
+        "client_order_id": str,
+        "reconciliation_job_id": str,
+        "outbound_attempt_proof": str,
+    }
+    forbidden_type_names = (
+        "executioncommand",
+        "approvalticket",
+        "tradinggateway",
+        "ui",
+        "alert",
+        "notification",
+        "credential",
+    )
+    assert all(
+        all(term not in str(field_type).lower() for term in forbidden_type_names)
+        for field_type in permit_fields.values()
+    )
+
+
+def test_ledger_lease_contract_is_the_only_future_gateway_value_source() -> None:
+    """Contract preparation reserves durable proof consumption for the next plan."""
+    assert get_type_hints(ExecutionLedger.lease_outbound_submission) == {
+        "permit": OutboundDispatchPermit,
+        "return": OutboundSubmission,
+    }
+    contract = ExecutionLedger.lease_outbound_submission.__doc__ or ""
+
+    assert "one-time" in contract
+    assert "durable" in contract
+    assert "rowcount" in contract
+    assert "future ledger implementation" in contract.lower()
+
+    submit_parameters = signature(TradingGateway.submit_order).parameters
+    assert tuple(submit_parameters) == ("self", "outbound")
 
 
 def test_ledger_observation_contract_is_explicitly_typed() -> None:

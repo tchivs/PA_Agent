@@ -35,12 +35,15 @@ from pa_agent.trading.domain.risk import (
     TargetConnectionObservation,
 )
 from pa_agent.trading.persistence.sqlite_connection import (
-    LedgerStorageError,
     open_sqlite_connection,
 )
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
-from tests.fixtures.execution_factories import make_spot_command
 from tests.fixtures.fake_exchange import ReconciliationOnlyGateway
+from tests.integration.execution.test_approval_consumption import (
+    _consumer,
+    _EvidenceAndSubmissionGateway,
+    _issue_ticket,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -109,8 +112,17 @@ class _CancellationGateway(ReconciliationOnlyGateway):
 
 
 def _create_open_order(ledger: SQLiteExecutionLedger) -> str:
-    admission = ledger.create_or_load_and_claim_submission(make_spot_command())
-    outbound = ledger.begin_outbound_submission(admission)
+    database_path = Path(ledger._require_connection().execute("PRAGMA database_list").fetchone()[2])
+    clock = _Clock()
+    evidence_gateway = _EvidenceAndSubmissionGateway()
+    ticket, candidate, policy = _issue_ticket(database_path, clock, evidence_gateway)
+    service = _consumer(database_path, clock, evidence_gateway)
+    try:
+        permit = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        assert permit is not None
+        outbound = service._ledger.lease_outbound_submission(permit)
+    finally:
+        service.close()
     ledger.mark_outbound_submission_ambiguous(outbound)
     job = ledger.list_unresolved_reconciliation_jobs()[0]
     ledger.apply_reconciliation_evidence(
@@ -153,8 +165,7 @@ def test_latch_survives_reopen_records_work_and_never_infers_remote_cancel(
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.LATCHED
         assert reopened.list_cancellation_work()[0].client_order_id == client_order_id
         assert reopened.list_cancellation_work()[0].remote_resolution is None
-        with pytest.raises(LedgerStorageError, match="kill switch"):
-            reopened.create_or_load_and_claim_submission(make_spot_command())
+        assert not hasattr(reopened, "create_or_load_and_claim_submission")
     finally:
         reopened.close()
 
@@ -214,15 +225,8 @@ def test_latch_rejects_new_ticket_consumption_and_preserves_existing_client_iden
     service = KillSwitchService(ledger=ledger, gateway=gateway, utc_now=clock.utc_now)
     service.latch("operator-stop", "operator-1", "paper-spot-primary", "manual safety stop")
 
-    with pytest.raises(LedgerStorageError, match="kill switch"):
-        ledger.begin_outbound_submission(
-            replace(
-                ledger.create_or_load_and_claim_submission(make_spot_command()),
-                claim_token="replacement-claim",
-                is_admissible=True,
-                lifecycle_state=OrderState.SUBMITTING,
-            )
-        )
+    assert not hasattr(ledger, "create_or_load_and_claim_submission")
+    assert not hasattr(ledger, "begin_outbound_submission")
 
     connection = open_sqlite_connection(execution_database_path)
     try:
@@ -262,7 +266,7 @@ def test_recovery_scope_assessment_ids_are_the_only_path_to_ready(
         inspection = open_sqlite_connection(execution_database_path)
         try:
             assert inspection.execute("SELECT COUNT(*) FROM recovery_assessments").fetchone()[0] == 1
-            assert inspection.execute("SELECT COUNT(*) FROM proposal_risk_assessments").fetchone()[0] == 0
+            assert inspection.execute("SELECT COUNT(*) FROM proposal_risk_assessments").fetchone()[0] == 2
         finally:
             inspection.close()
         assessment_id = _only_recovery_assessment_id(execution_database_path)

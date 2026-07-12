@@ -72,7 +72,6 @@ from pa_agent.trading.ports.ledger import (
     ProposalAuditFact,
     ReconciliationJob,
     ReconciliationResult,
-    SubmissionAdmission,
 )
 from pa_agent.trading.security.redaction import SecretRedactor, output_redactor
 
@@ -109,144 +108,6 @@ class SQLiteExecutionLedger(ExecutionLedger):
         if self._clock is not None:
             return self._clock.utc_now()
         return datetime.now(UTC)
-
-    def create_or_load_and_claim_submission(self, command: ExecutionCommand) -> SubmissionAdmission:
-        """Atomically create the first command records or reload a non-admissible repeat."""
-        connection = self._require_connection()
-        with transaction(connection):
-            self._require_ready_in_transaction()
-            existing = self._load_admission(command.logical_command_key)
-            if existing is not None:
-                return existing
-
-            client_order_id = _new_id("client-order")
-            durable_command = ExecutionCommand(
-                command_id=command.command_id,
-                logical_command_key=command.logical_command_key,
-                client_order_id=client_order_id,
-                mode=command.mode,
-                account_id=command.account_id,
-                symbol=command.symbol,
-                side=command.side,
-                order_type=command.order_type,
-                quantity=command.quantity,
-                context=command.context,
-                price=command.price,
-            )
-            command_json = _canonical_json(durable_command.to_canonical_dict())
-            now = _timestamp_text(self.utc_now())
-            submitting = assert_transition(OrderState.PROPOSED, LifecycleEvent.SUBMIT_REQUESTED)
-            job_id = _new_id("reconciliation")
-            claim_token = _new_id("claim-token")
-            claim_id = _new_id("claim")
-
-            connection.execute(
-                """
-                INSERT INTO order_commands(
-                    command_id, logical_command_key, client_order_id, command_json,
-                    mode, product, account_id, symbol, created_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    durable_command.command_id,
-                    durable_command.logical_command_key,
-                    client_order_id,
-                    command_json,
-                    durable_command.mode.value,
-                    durable_command.context.product.value,
-                    durable_command.account_id,
-                    durable_command.symbol,
-                    now,
-                ),
-            )
-            self._append_event(
-                command_id=command.command_id,
-                previous_state=OrderState.PROPOSED,
-                new_state=submitting,
-                event=LifecycleEvent.SUBMIT_REQUESTED,
-                occurred_at=now,
-                detail={"source": "local"},
-            )
-            connection.execute(
-                """
-                INSERT INTO orders(
-                    command_id, exchange_order_id, lifecycle_state, filled_quantity, filled_notional,
-                    evidence_cursor
-                ) VALUES (?, NULL, ?, ?, ?, NULL)
-                """,
-                (command.command_id, submitting.value, "0", "0"),
-            )
-            connection.execute(
-                """
-                INSERT INTO reconciliation_jobs(
-                    job_id, command_id, reason, status, attempt_count, next_action_at_utc
-                ) VALUES (?, ?, ?, ?, 0, ?)
-                """,
-                (job_id, command.command_id, "submission_pending", "queued", now),
-            )
-            self._inject_failure("before_claim")
-            connection.execute(
-                """
-                INSERT INTO submission_claims(claim_id, command_id, claim_token, admitted_at_utc, status)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (claim_id, command.command_id, claim_token, now, "admitted"),
-            )
-            return SubmissionAdmission(
-                command_id=durable_command.command_id,
-                client_order_id=client_order_id,
-                reconciliation_job_id=job_id,
-                lifecycle_state=submitting,
-                is_admissible=True,
-                claim_token=claim_token,
-            )
-    def begin_outbound_submission(self, admission: SubmissionAdmission) -> OutboundSubmission:
-        """Atomically consume an admitted claim into one irreversible authorization."""
-        if not admission.is_admissible or admission.claim_token is None:
-            raise LedgerStorageError("cannot begin outbound submission without an admitted claim")
-        connection = self._require_connection()
-        with transaction(connection):
-            self._require_ready_in_transaction()
-            row = connection.execute(
-                """
-                SELECT commands.command_json, commands.client_order_id, jobs.job_id,
-                       orders.lifecycle_state, claims.claim_token, claims.status
-                FROM order_commands AS commands
-                JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
-                JOIN orders ON orders.command_id = commands.command_id
-                JOIN submission_claims AS claims ON claims.command_id = commands.command_id
-                WHERE commands.command_id = ?
-                """,
-                (admission.command_id,),
-            ).fetchone()
-            if (
-                row is None
-                or row[1] != admission.client_order_id
-                or row[2] != admission.reconciliation_job_id
-                or row[3] != OrderState.SUBMITTING.value
-                or row[4] != admission.claim_token
-                or row[5] != "admitted"
-            ):
-                raise LedgerStorageError("cannot begin outbound submission from durable state")
-            started = connection.execute(
-                """
-                UPDATE submission_claims SET status = ?
-                WHERE command_id = ? AND claim_token = ? AND status = ?
-                """,
-                ("outbound_started", admission.command_id, admission.claim_token, "admitted"),
-            )
-            if started.rowcount != 1:
-                raise LedgerStorageError("cannot begin outbound submission from durable state")
-            command = _command_from_canonical_json(row[0])
-            if command.command_id != admission.command_id or command.client_order_id != row[1]:
-                raise LedgerStorageError("durable command identity does not match admission")
-            return OutboundSubmission(
-                command=command,
-                command_id=admission.command_id,
-                client_order_id=row[1],
-                reconciliation_job_id=row[2],
-                outbound_attempt_token=_new_id("outbound-attempt"),
-            )
 
     def consume_valid_ticket_and_begin_outbound(
         self,
@@ -503,13 +364,10 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 outbound_attempt_token=permit.outbound_attempt_proof,
             )
 
-    def mark_submission_ambiguous(
-        self,
-        admission: SubmissionAdmission,
-        *,
-        event: LifecycleEvent = LifecycleEvent.LOCAL_TIMEOUT,
+    def _mark_leased_outbound_ambiguous(
+        self, outbound: OutboundSubmission, *, event: LifecycleEvent = LifecycleEvent.LOCAL_TIMEOUT
     ) -> None:
-        """Persist a local interruption without allocating replacement identities."""
+        """Persist a local interruption for an already leased outbound value."""
         if event not in {
             LifecycleEvent.LOCAL_TIMEOUT,
             LifecycleEvent.LOCAL_CANCELLATION,
@@ -529,31 +387,23 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 JOIN submission_claims AS claims ON claims.command_id = commands.command_id
                 WHERE commands.command_id = ?
                 """,
-                (admission.command_id,),
+                (outbound.command_id,),
             ).fetchone()
-            if row is None or row[0] != admission.client_order_id or row[2] != admission.reconciliation_job_id:
-                raise LedgerStorageError("submission admission does not match durable ledger identities")
-            if not admission.is_admissible or admission.claim_token is None or row[3] != admission.claim_token:
-                raise LedgerStorageError("submission admission does not match a durable claim")
+            if row is None or row[0] != outbound.client_order_id or row[2] != outbound.reconciliation_job_id:
+                raise LedgerStorageError("outbound submission does not match durable ledger identities")
+            if row[4] != "outbound_started":
+                raise LedgerStorageError("outbound submission does not match a durable claim")
             previous_state = OrderState(row[1])
             if previous_state is OrderState.SUBMISSION_UNKNOWN:
-                if row[4] not in {"admitted", "consumed", "outbound_started"}:
+                if row[4] != "outbound_started":
                     raise LedgerStorageError("ambiguous submission has an invalid durable claim status")
-                if row[4] == "admitted":
-                    connection.execute(
-                        """
-                        UPDATE submission_claims SET status = ?
-                        WHERE command_id = ? AND claim_token = ? AND status = ?
-                        """,
-                        ("consumed", admission.command_id, admission.claim_token, "admitted"),
-                    )
                 return
-            if row[4] not in {"admitted", "outbound_started"}:
+            if row[4] != "outbound_started":
                 raise LedgerStorageError("submission claim is no longer live")
             next_state = assert_transition(previous_state, event)
             now = _timestamp_text(self.utc_now())
             self._append_event(
-                command_id=admission.command_id,
+                command_id=outbound.command_id,
                 previous_state=previous_state,
                 new_state=next_state,
                 event=event,
@@ -562,7 +412,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
             )
             connection.execute(
                 "UPDATE orders SET lifecycle_state = ? WHERE command_id = ?",
-                (next_state.value, admission.command_id),
+                (next_state.value, outbound.command_id),
             )
             connection.execute(
                 """
@@ -570,18 +420,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 SET reason = ?, status = ?, next_action_at_utc = ?
                 WHERE job_id = ?
                 """,
-                (event.value, "queued", now, admission.reconciliation_job_id),
+                (event.value, "queued", now, outbound.reconciliation_job_id),
             )
-            if row[4] == "admitted":
-                consumed = connection.execute(
-                    """
-                    UPDATE submission_claims SET status = ?
-                    WHERE command_id = ? AND claim_token = ? AND status = ?
-                    """,
-                    ("consumed", admission.command_id, admission.claim_token, "admitted"),
-                )
-                if consumed.rowcount != 1:
-                    raise LedgerStorageError("submission claim could not be consumed")
 
     def mark_outbound_submission_ambiguous(self, outbound: OutboundSubmission) -> None:
         """Retain recovery work after an authorized outbound gateway exception."""
@@ -599,16 +439,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         ).fetchone()
         if row is None or outbound.client_order_id != outbound.command.client_order_id:
             raise LedgerStorageError("outbound submission does not match durable authorization")
-        self.mark_submission_ambiguous(
-            SubmissionAdmission(
-                command_id=outbound.command_id,
-                client_order_id=outbound.client_order_id,
-                reconciliation_job_id=outbound.reconciliation_job_id,
-                lifecycle_state=OrderState(row[1]),
-                is_admissible=True,
-                claim_token=row[0],
-            )
-        )
+        self._mark_leased_outbound_ambiguous(outbound)
 
     def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
         """Load queued non-terminal work using the first persisted identities."""
@@ -1720,35 +1551,6 @@ class SQLiteExecutionLedger(ExecutionLedger):
     def _safe_canonical_json(self, value: Any) -> str:
         """Canonicalize a redacted, JSON-compatible audit value."""
         return _canonical_json(self._redactor.redact(value))
-
-    def _load_admission(self, logical_command_key: str) -> SubmissionAdmission | None:
-        """Load persisted identities for a repeat without allocating any new authority."""
-        row = self._require_connection().execute(
-            """
-            SELECT commands.command_id, commands.client_order_id, jobs.job_id, orders.lifecycle_state
-            FROM order_commands AS commands
-            JOIN orders ON orders.command_id = commands.command_id
-            JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
-            WHERE commands.logical_command_key = ?
-            """,
-            (logical_command_key,),
-        ).fetchone()
-        if row is None:
-            return None
-        try:
-            state = OrderState(row[3])
-        except ValueError as exc:
-            raise LedgerStorageError("stored order lifecycle state is invalid") from exc
-        if state in {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED}:
-            raise LedgerStorageError("stored command is terminal and cannot receive admission")
-        return SubmissionAdmission(
-            command_id=row[0],
-            client_order_id=row[1],
-            reconciliation_job_id=row[2],
-            lifecycle_state=state,
-            is_admissible=False,
-            claim_token=None,
-        )
 
     def _require_ready_in_transaction(self) -> None:
         """Fail closed at every durable path that could create outbound authority."""

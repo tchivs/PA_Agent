@@ -12,7 +12,6 @@ from pa_agent.trading.ports.ledger import (
     OutboundSubmission,
     ReconciliationJob,
     ReconciliationResult,
-    SubmissionAdmission,
 )
 
 __all__ = [
@@ -22,7 +21,6 @@ __all__ = [
     "OutboundSubmission",
     "ReconciliationJob",
     "ReconciliationResult",
-    "SubmissionAdmission",
     "TradingGateway",
     "TradingGatewayError",
     "UtcClock",

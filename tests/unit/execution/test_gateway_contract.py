@@ -6,8 +6,6 @@ from dataclasses import fields
 from inspect import getmembers, isabstract, signature
 from typing import Any, get_type_hints
 
-import pytest
-
 from pa_agent.trading.domain.approval import ExecutionTarget
 from pa_agent.trading.domain.errors import TradingDomainError
 from pa_agent.trading.domain.models import (
@@ -17,7 +15,6 @@ from pa_agent.trading.domain.models import (
     GatewayCapabilities,
     GatewayEvidence,
     OrderProjection,
-    OrderState,
     ProductType,
     QuoteObservation,
     RuleObservation,
@@ -37,8 +34,8 @@ from pa_agent.trading.ports.gateway import (
     TradingGateway,
     TradingGatewayError,
 )
-from pa_agent.trading.ports.ledger import OutboundDispatchPermit, SubmissionAdmission
-from tests.fixtures.execution_factories import make_account_observation, make_spot_command
+from pa_agent.trading.ports.ledger import OutboundDispatchPermit
+from tests.fixtures.execution_factories import make_account_observation
 
 
 def test_trading_gateway_exposes_the_complete_canonical_operation_surface() -> None:
@@ -137,61 +134,14 @@ def test_gateway_failures_are_typed_trading_domain_errors() -> None:
 
 
 
-def test_submission_admission_discards_caller_identity_candidates() -> None:
-    """The ledger owns the only durable remote identity allocation boundary."""
-    hints = get_type_hints(ExecutionLedger.create_or_load_and_claim_submission)
-    contract = ExecutionLedger.create_or_load_and_claim_submission.__doc__ or ""
-
-    assert hints == {"command": ExecutionCommand, "return": SubmissionAdmission}
-    assert "caller candidate" in contract
-    assert "allocates one opaque" in contract
-    assert "durable client-order ID" in contract
-    assert "repeat and recovery" in contract
-
-    admission = SubmissionAdmission(
-        command_id="command-first",
-        client_order_id="durable-client-first",
-        reconciliation_job_id="job-first",
-        lifecycle_state=OrderState.SUBMITTING,
-        is_admissible=True,
-        claim_token="opaque-first-claim",
-    )
-
-    assert admission.is_admissible
-    assert admission.client_order_id == "durable-client-first"
-
-
-def test_begin_outbound_submission_returns_irreversible_durable_authorization() -> None:
-    """An admissible claim is consumed into the only gateway submission authority."""
-    assert get_type_hints(ExecutionLedger.begin_outbound_submission) == {
-        "admission": SubmissionAdmission,
+def test_ledger_exposes_no_command_or_admission_to_outbound_authority() -> None:
+    """Only a persisted permit can reach the lease contract."""
+    assert not hasattr(ExecutionLedger, "create_or_load_and_claim_submission")
+    assert not hasattr(ExecutionLedger, "begin_outbound_submission")
+    assert get_type_hints(ExecutionLedger.lease_outbound_submission) == {
+        "permit": OutboundDispatchPermit,
         "return": OutboundSubmission,
     }
-    contract = ExecutionLedger.begin_outbound_submission.__doc__ or ""
-    assert "atomic durable state change" in contract
-    assert "cannot revoke" in contract
-    assert "second begin" in contract
-
-    command = make_spot_command(client_order_id="durable-client-first")
-    outbound = OutboundSubmission(
-        command=command,
-        command_id=command.command_id,
-        client_order_id="durable-client-first",
-        reconciliation_job_id="job-first",
-        outbound_attempt_token="opaque-outbound-attempt",
-    )
-
-    assert outbound.command is command
-    assert outbound.client_order_id == "durable-client-first"
-    assert outbound.outbound_attempt_token == "opaque-outbound-attempt"
-    with pytest.raises(ValueError):
-        OutboundSubmission(
-            command=command,
-            command_id="replacement-command",
-            client_order_id="durable-client-first",
-            reconciliation_job_id="job-first",
-            outbound_attempt_token="opaque-outbound-attempt",
-        )
 
 
 def test_gateway_submission_requires_the_protected_outbound_authorization() -> None:

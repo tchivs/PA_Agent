@@ -24,14 +24,16 @@ from pa_agent.trading.domain.risk import (
     OrderRateObservation,
     select_phase2_policy,
 )
-from pa_agent.trading.ports.gateway import GatewayUnavailableError, TargetConnectionObservation
+from pa_agent.trading.ports.gateway import (
+    GatewayUnavailableError,
+    TargetConnectionObservation,
+)
 from tests.fixtures.execution_factories import (
     make_account_observation,
     make_candidate_execution_intent,
     make_execution_target,
 )
 from tests.fixtures.fake_exchange import ScriptedEvidenceGateway
-
 
 pytestmark = pytest.mark.integration
 
@@ -50,37 +52,45 @@ CALL_SEQUENCE = [
 ]
 
 
-def _gateway(*, fee_rates: list[object] | None = None, connections: list[object] | None = None) -> ScriptedEvidenceGateway:
+def _gateway(
+    *,
+    fee_rates: list[object] | None = None,
+    connections: list[object] | None = None,
+    overrides: dict[str, list[object]] | None = None,
+) -> ScriptedEvidenceGateway:
     target = make_execution_target()
     quote = QuoteObservation(symbol="BTCUSDT", bid="7999.50", ask="8000", observed_at=NOW)
-    return ScriptedEvidenceGateway(
-        capabilities=[GatewayCapabilities(frozenset({ProductType.SPOT}), True)] * 2,
-        rules=[
+    responses: dict[str, list[object]] = {
+        "capabilities": [GatewayCapabilities(frozenset({ProductType.SPOT}), True)] * 2,
+        "rules": [
             RuleObservation(
                 InstrumentRules("BTCUSDT", "0.50", "0.001", "0.001", "10"), NOW
             )
-        ] * 2,
-        accounts=[
+        ]
+        * 2,
+        "accounts": [
             make_account_observation(
                 observed_at=NOW,
                 balances=(Balance("USDT", "2000", "1500", "0"),),
                 positions=(),
             )
-        ] * 2,
-        quotes=[quote] * 2,
-        server_times=[TimeObservation(server_time=NOW, observed_at=NOW)] * 2,
-        connections=connections
+        ]
+        * 2,
+        "quotes": [quote] * 2,
+        "server_times": [TimeObservation(server_time=NOW, observed_at=NOW)] * 2,
+        "connections": connections
         or [TargetConnectionObservation(target=target, connected=True, observed_at=NOW)] * 2,
-        open_orders=[OpenOrderObservation(target=target, count=2, observed_at=NOW)] * 2,
-        order_rates=[
+        "open_orders": [OpenOrderObservation(target=target, count=2, observed_at=NOW)] * 2,
+        "order_rates": [
             OrderRateObservation(
                 target=target,
                 count=4,
                 window_started_at=NOW - timedelta(seconds=60),
                 window_ends_at=NOW,
             )
-        ] * 2,
-        loss_drawdowns=[
+        ]
+        * 2,
+        "loss_drawdowns": [
             LossDrawdownObservation(
                 target=target,
                 realized_loss="99",
@@ -88,8 +98,9 @@ def _gateway(*, fee_rates: list[object] | None = None, connections: list[object]
                 utc_day_started_at=datetime(2026, 7, 12, tzinfo=UTC),
                 observed_at=NOW,
             )
-        ] * 2,
-        fee_rates=fee_rates
+        ]
+        * 2,
+        "fee_rates": fee_rates
         or [
             FeeRateObservation(
                 target=target,
@@ -102,6 +113,20 @@ def _gateway(*, fee_rates: list[object] | None = None, connections: list[object]
             )
         ]
         * 2,
+    }
+    if overrides:
+        responses.update(overrides)
+    return ScriptedEvidenceGateway(
+        capabilities=responses["capabilities"],
+        rules=responses["rules"],
+        accounts=responses["accounts"],
+        quotes=responses["quotes"],
+        server_times=responses["server_times"],
+        connections=responses["connections"],
+        open_orders=responses["open_orders"],
+        order_rates=responses["order_rates"],
+        loss_drawdowns=responses["loss_drawdowns"],
+        fee_rates=responses["fee_rates"],
     )
 
 
@@ -176,5 +201,53 @@ def test_degraded_connection_rejects_before_risk_engine_or_submission() -> None:
 
     assert assessment.accepted is False
     assert RiskRejectionReason.EVIDENCE_CONNECTION_DEGRADED in assessment.reason_codes
+    assert gateway.call_order == CALL_SEQUENCE
+    assert gateway.submit_call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        (
+            {"capabilities": [GatewayCapabilities(frozenset(), True)]},
+            RiskRejectionReason.EVIDENCE_CAPABILITY_MISMATCH,
+        ),
+        (
+            {"accounts": [make_account_observation(account_id="other-account", observed_at=NOW)]},
+            RiskRejectionReason.EVIDENCE_ACCOUNT_MISMATCH,
+        ),
+        (
+            {"quotes": [QuoteObservation("ETHUSDT", "7999.50", "8000", NOW)]},
+            RiskRejectionReason.EVIDENCE_SYMBOL_MISMATCH,
+        ),
+        (
+            {"server_times": [TimeObservation(NOW + timedelta(seconds=61), NOW)]},
+            RiskRejectionReason.EVIDENCE_CLOCK_SKEW,
+        ),
+        (
+            {
+                "order_rates": [
+                    OrderRateObservation(
+                        target=make_execution_target(),
+                        count=0,
+                        window_started_at=NOW - timedelta(seconds=59),
+                        window_ends_at=NOW,
+                    )
+                ]
+            },
+            RiskRejectionReason.EVIDENCE_WINDOW_INVALID,
+        ),
+    ],
+)
+def test_contradictory_current_observations_reject_before_assessment(
+    overrides: dict[str, list[object]], reason: RiskRejectionReason
+) -> None:
+    gateway = _gateway(overrides=overrides)
+
+    assessment = _assess(gateway)
+
+    assert assessment.accepted is False
+    assert reason in assessment.reason_codes
+    assert assessment.fee_estimate is None
     assert gateway.call_order == CALL_SEQUENCE
     assert gateway.submit_call_count == 0

@@ -89,6 +89,12 @@ class RiskRejectionReason(StrEnum):
     FEE_EVIDENCE_STALE = "fee_evidence_stale"
     FEE_EVIDENCE_TARGET_MISMATCH = "fee_evidence_target_mismatch"
     FEE_EVIDENCE_SYMBOL_MISMATCH = "fee_evidence_symbol_mismatch"
+    EVIDENCE_UNAVAILABLE = "evidence_unavailable"
+    EVIDENCE_STALE = "evidence_stale"
+    EVIDENCE_FUTURE = "evidence_future"
+    EVIDENCE_CLOCK_SKEW = "evidence_clock_skew"
+    EVIDENCE_CONNECTION_DEGRADED = "evidence_connection_degraded"
+    EVIDENCE_CAPABILITY_MISMATCH = "evidence_capability_mismatch"
     INVALID_ECONOMIC_INPUT = "invalid_economic_input"
 
 

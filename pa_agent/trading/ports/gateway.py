@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from pa_agent.trading.domain.approval import ExecutionTarget
 from pa_agent.trading.domain.errors import TradingDomainError
 from pa_agent.trading.domain.models import (
     AccountObservation,
@@ -15,6 +16,13 @@ from pa_agent.trading.domain.models import (
     QuoteObservation,
     RuleObservation,
     TimeObservation,
+)
+from pa_agent.trading.domain.risk import (
+    FeeRateObservation,
+    LossDrawdownObservation,
+    OpenOrderObservation,
+    OrderRateObservation,
+    TargetConnectionObservation,
 )
 from pa_agent.trading.ports.ledger import OutboundSubmission
 
@@ -61,6 +69,30 @@ class TradingGateway(ABC):
         self, account_id: str, product: ProductType
     ) -> AccountObservation:
         """Return canonical account evidence scoped to one account and product."""
+
+    @abstractmethod
+    def get_connection(self, target: ExecutionTarget) -> TargetConnectionObservation:
+        """Return fresh normalized connectivity for exactly one execution target."""
+
+    @abstractmethod
+    def get_open_order_count(self, target: ExecutionTarget) -> OpenOrderObservation:
+        """Return the current target-bound open-order counter."""
+
+    @abstractmethod
+    def get_order_rate_window(
+        self, target: ExecutionTarget, window_seconds: int
+    ) -> OrderRateObservation:
+        """Return the current target-bound accepted-order count for one exact window."""
+
+    @abstractmethod
+    def get_loss_drawdown(self, target: ExecutionTarget) -> LossDrawdownObservation:
+        """Return current target-bound UTC-day realized-loss and drawdown evidence."""
+
+    @abstractmethod
+    def get_fee_rate(
+        self, target: ExecutionTarget, symbol: str, quote_identifier: str
+    ) -> FeeRateObservation:
+        """Return the current target/symbol/quote-bound fee rate version."""
 
     @abstractmethod
     def submit_order(self, outbound: OutboundSubmission) -> GatewayEvidence:

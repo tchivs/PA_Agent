@@ -8,13 +8,21 @@ import pytest
 
 from pa_agent.trading.application.risk_engine import RiskEngine
 from pa_agent.trading.domain.errors import DecimalValueError, RiskRejectionReason
-from pa_agent.trading.domain.models import Balance, InstrumentRules, QuoteObservation
+from pa_agent.trading.domain.models import (
+    Balance,
+    GatewayCapabilities,
+    InstrumentRules,
+    ProductType,
+    QuoteObservation,
+    TimeObservation,
+)
 from pa_agent.trading.domain.risk import (
     EvidenceBundle,
     FeeRateObservation,
     LossDrawdownObservation,
     OpenOrderObservation,
     OrderRateObservation,
+    TargetConnectionObservation,
     estimate_fee,
     select_phase2_policy,
 )
@@ -30,6 +38,7 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 def make_evidence_bundle(**overrides: object) -> EvidenceBundle:
     target = make_execution_target()
     values: dict[str, object] = {
+        "capabilities": GatewayCapabilities(frozenset({ProductType.SPOT}), True),
         "instrument_rules": InstrumentRules(
             symbol="BTCUSDT",
             price_tick="0.50",
@@ -37,6 +46,7 @@ def make_evidence_bundle(**overrides: object) -> EvidenceBundle:
             minimum_quantity="0.001",
             minimum_notional="10",
         ),
+        "rule_observed_at": NOW,
         "account": make_account_observation(
             observed_at=NOW,
             balances=(Balance(asset="USDT", total="2000", available="1500", reserved="0"),),
@@ -44,6 +54,10 @@ def make_evidence_bundle(**overrides: object) -> EvidenceBundle:
         ),
         "quote": QuoteObservation(
             symbol="BTCUSDT", bid="7999.50", ask="8000", observed_at=NOW
+        ),
+        "server_time": TimeObservation(server_time=NOW, observed_at=NOW),
+        "connection": TargetConnectionObservation(
+            target=target, connected=True, observed_at=NOW
         ),
         "open_orders": OpenOrderObservation(target=target, count=2, observed_at=NOW),
         "order_rate": OrderRateObservation(

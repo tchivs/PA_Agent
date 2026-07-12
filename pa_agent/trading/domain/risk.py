@@ -11,11 +11,13 @@ from pa_agent.trading.domain.approval import CandidateExecutionIntent, Execution
 from pa_agent.trading.domain.errors import RiskRejection, RiskRejectionReason
 from pa_agent.trading.domain.models import (
     AccountObservation,
+    GatewayCapabilities,
     InstrumentRules,
     Mode,
     OrderType,
     ProductType,
     QuoteObservation,
+    TimeObservation,
     canonicalize,
     decimal_from_canonical,
 )
@@ -209,6 +211,20 @@ class FeeRateObservation:
 
 
 @dataclass(frozen=True)
+class TargetConnectionObservation:
+    """Fresh canonical connectivity evidence bound to the selected target."""
+
+    target: ExecutionTarget
+    connected: bool
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if type(self.connected) is not bool:
+            raise ValueError("connected must be a bool")
+        _require_aware(self.observed_at, "observed_at")
+
+
+@dataclass(frozen=True)
 class FeeEstimate:
     target: ExecutionTarget
     symbol: str
@@ -242,9 +258,13 @@ def estimate_fee(
 
 @dataclass(frozen=True)
 class EvidenceBundle:
+    capabilities: GatewayCapabilities
     instrument_rules: InstrumentRules
+    rule_observed_at: datetime
     account: AccountObservation
     quote: QuoteObservation
+    server_time: TimeObservation
+    connection: TargetConnectionObservation
     open_orders: OpenOrderObservation
     order_rate: OrderRateObservation
     loss_drawdown: LossDrawdownObservation
@@ -252,14 +272,19 @@ class EvidenceBundle:
     evidence_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
+        _require_aware(self.rule_observed_at, "rule_observed_at")
         object.__setattr__(
             self,
             "evidence_digest",
             _digest(
                 {
+                    "capabilities": self.capabilities,
                     "instrument_rules": self.instrument_rules,
+                    "rule_observed_at": self.rule_observed_at,
                     "account": self.account,
                     "quote": self.quote,
+                    "server_time": self.server_time,
+                    "connection": self.connection,
                     "open_orders": self.open_orders,
                     "order_rate": self.order_rate,
                     "loss_drawdown": self.loss_drawdown,

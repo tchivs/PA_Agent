@@ -7,6 +7,7 @@ from typing import Any, get_type_hints
 
 import pytest
 
+from pa_agent.trading.domain.approval import ExecutionTarget
 from pa_agent.trading.domain.errors import TradingDomainError
 from pa_agent.trading.domain.models import (
     AccountObservation,
@@ -21,13 +22,20 @@ from pa_agent.trading.domain.models import (
     RuleObservation,
     TimeObservation,
 )
+from pa_agent.trading.domain.risk import (
+    FeeRateObservation,
+    LossDrawdownObservation,
+    OpenOrderObservation,
+    OrderRateObservation,
+    TargetConnectionObservation,
+)
+from pa_agent.trading.ports import ExecutionLedger, OutboundSubmission
 from pa_agent.trading.ports.gateway import (
     GatewayAmbiguityError,
     GatewayUnavailableError,
     TradingGateway,
     TradingGatewayError,
 )
-from pa_agent.trading.ports import ExecutionLedger, OutboundSubmission
 from pa_agent.trading.ports.ledger import SubmissionAdmission
 from tests.fixtures.execution_factories import make_account_observation, make_spot_command
 
@@ -40,6 +48,11 @@ def test_trading_gateway_exposes_the_complete_canonical_operation_surface() -> N
         "get_quote",
         "get_instrument_rules",
         "get_account_snapshot",
+        "get_connection",
+        "get_open_order_count",
+        "get_order_rate_window",
+        "get_loss_drawdown",
+        "get_fee_rate",
         "submit_order",
         "cancel_order",
         "lookup_order_by_client_id",
@@ -71,6 +84,20 @@ def test_trading_gateway_annotations_are_canonical_and_venue_neutral() -> None:
             "account_id": str,
             "product": ProductType,
             "return": AccountObservation,
+        },
+        "get_connection": {"target": ExecutionTarget, "return": TargetConnectionObservation},
+        "get_open_order_count": {"target": ExecutionTarget, "return": OpenOrderObservation},
+        "get_order_rate_window": {
+            "target": ExecutionTarget,
+            "window_seconds": int,
+            "return": OrderRateObservation,
+        },
+        "get_loss_drawdown": {"target": ExecutionTarget, "return": LossDrawdownObservation},
+        "get_fee_rate": {
+            "target": ExecutionTarget,
+            "symbol": str,
+            "quote_identifier": str,
+            "return": FeeRateObservation,
         },
         "submit_order": {"outbound": OutboundSubmission, "return": GatewayEvidence},
         "cancel_order": {"client_order_id": str, "return": GatewayEvidence},

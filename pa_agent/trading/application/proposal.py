@@ -20,6 +20,7 @@ from pa_agent.trading.domain.errors import ConversionRejection, RiskRejectionRea
 from pa_agent.trading.domain.risk import RiskAssessment, RiskPolicy
 from pa_agent.trading.persistence.sqlite_connection import LedgerStorageError
 from pa_agent.trading.ports.ledger import ExecutionLedger
+from pa_agent.trading.security.redaction import SecretRedactor, output_redactor
 
 
 class ProposalService:
@@ -33,12 +34,14 @@ class ProposalService:
         evidence_collector: FreshEvidenceCollector,
         risk_engine: RiskEngine,
         approval_service: ApprovalService | None = None,
+        redactor: SecretRedactor | None = None,
     ) -> None:
         self._ledger = ledger
         self._intent_factory = intent_factory
         self._evidence_collector = evidence_collector
         self._risk_engine = risk_engine
         self._approval_service = approval_service
+        self._redactor = redactor or output_redactor()
 
     def propose(
         self, snapshot: SourceAnalysisSnapshot, target: ExecutionTarget

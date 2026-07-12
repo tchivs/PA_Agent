@@ -14,7 +14,12 @@ import pytest
 from pydantic import ValidationError
 
 from pa_agent.config.settings import Settings, TradingSettings, load_settings, save_settings
-from pa_agent.trading.security.credentials import CredentialReference
+from pa_agent.trading.security.credentials import (
+    CredentialReference,
+    CredentialSecurityError,
+    ProviderCredentialResult,
+    deliver_trading_credentials,
+)
 from pa_agent.trading.security.redaction import REDACTION_TOKEN, SecretRedactor
 from pa_agent.trading.application.evidence_collector import FreshEvidenceCollector
 from pa_agent.trading.application.intent_factory import IntentFactory
@@ -148,6 +153,22 @@ def _gateway() -> ScriptedEvidenceGateway:
 
 def test_proposal_service_and_sqlite_audit_do_not_persist_injected_secret_material(tmp_path: Path) -> None:
     """The real proposal/audit path persists canonical facts, not source secret text."""
+    with pytest.raises(CredentialSecurityError):
+        deliver_trading_credentials(
+            ProviderCredentialResult(
+                reference=CredentialReference(provider="environment", reference_id="paper-spot-default"),
+                values={
+                    "api_key": API_KEY,
+                    "secret": API_SECRET,
+                    "passphrase": PASSPHRASE,
+                    "signature": SIGNATURE,
+                    "authorization": AUTHORIZATION,
+                    "query": QUERY_SECRET,
+                },
+                declared_permissions=frozenset({"trade", "withdraw"}),
+            ),
+            lambda _: None,
+        )
     database = tmp_path / "execution.sqlite3"
     ledger = SQLiteExecutionLedger(database)
     target = make_execution_target()

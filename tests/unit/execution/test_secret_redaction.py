@@ -62,7 +62,7 @@ def test_withdrawal_capable_provider_result_is_rejected_before_execution_consume
     """No execution-facing consumer can receive a withdrawal-capable result."""
     consumer = RecordingExecutionConsumer()
 
-    with pytest.raises(CredentialSecurityError, match="withdraw"):
+    with pytest.raises(CredentialSecurityError, match="credential_permission_rejected"):
         deliver_trading_credentials(result, consumer.receive)
 
     assert consumer.received == []

@@ -68,6 +68,7 @@ from pa_agent.trading.ports.ledger import (
     ReconciliationResult,
     SubmissionAdmission,
 )
+from pa_agent.trading.security.redaction import SecretRedactor, output_redactor
 
 
 class SQLiteExecutionLedger(ExecutionLedger):
@@ -84,10 +85,12 @@ class SQLiteExecutionLedger(ExecutionLedger):
         *,
         clock: UtcClock | None = None,
         failure_injector: Callable[[str], None] | None = None,
+        redactor: SecretRedactor | None = None,
     ) -> None:
         self._connection: sqlite3.Connection | None = bootstrap_sqlite_connection(database_path)
         self._clock = clock
         self._failure_injector = failure_injector
+        self._redactor = redactor or output_redactor()
 
     def close(self) -> None:
         """Close the thread-confined SQLite connection deterministically."""
@@ -744,7 +747,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         with transaction(connection):
             snapshot_digest = self._record_candidate_source(candidate)
             now = _timestamp_text(self.utc_now())
-            candidate_json = _canonical_json(canonicalize(candidate))
+            candidate_json = self._safe_canonical_json(canonicalize(candidate))
             connection.execute(
                 """
                 INSERT OR IGNORE INTO proposal_candidates(
@@ -784,7 +787,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         with transaction(connection):
             snapshot_digest = self._candidate_snapshot_digest(candidate)
             now = _timestamp_text(self.utc_now())
-            evidence_json = _canonical_json(canonicalize(evidence))
+            evidence_json = self._safe_canonical_json(canonicalize(evidence))
             inserted = connection.execute(
                 """
                 INSERT OR IGNORE INTO proposal_evidence(
@@ -856,7 +859,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     assessment.evidence_digest,
                     _canonical_json(reason_codes),
                     fee_amount,
-                    _canonical_json(canonicalize(assessment)),
+                    self._safe_canonical_json(canonicalize(assessment)),
                     now,
                     now,
                 ),
@@ -957,7 +960,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
             ).fetchone()
             if candidate_row is None or evidence_row is None or assessment_row is None:
                 raise LedgerStorageError("ticket issuance requires persisted candidate, evidence, and acceptance")
-            if candidate_row[0] != _canonical_json(canonicalize(candidate)):
+            if candidate_row[0] != self._safe_canonical_json(canonicalize(candidate)):
                 raise LedgerStorageError("ticket candidate does not match durable proposal facts")
             if json.loads(assessment_row[0]) != canonicalize(assessment):
                 raise LedgerStorageError("ticket assessment does not match durable proposal facts")
@@ -1342,12 +1345,12 @@ class SQLiteExecutionLedger(ExecutionLedger):
             """,
             (
                 snapshot_digest,
-                snapshot.source_id,
+                self._safe_string(snapshot.source_id),
                 _timestamp_text(snapshot.completed_at),
                 snapshot.schema_version,
                 snapshot.parser_version,
                 snapshot.decision_digest,
-                _canonical_json(canonicalize(target)),
+                self._safe_canonical_json(canonicalize(target)),
             ),
         )
         return snapshot_digest
@@ -1364,12 +1367,12 @@ class SQLiteExecutionLedger(ExecutionLedger):
             """,
             (
                 snapshot_digest,
-                candidate.source_id,
+                self._safe_string(candidate.source_id),
                 _timestamp_text(candidate.source_completed_at),
                 candidate.source_schema_version,
                 candidate.source_parser_version,
                 candidate.source_decision_digest,
-                _canonical_json(canonicalize(candidate.target)),
+                self._safe_canonical_json(canonicalize(candidate.target)),
             ),
         )
         return snapshot_digest
@@ -1420,7 +1423,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
             (
                 _new_id("proposal-audit"),
                 kind,
-                source_id,
+                self._safe_string(source_id),
                 source_digest,
                 snapshot_digest,
                 intent_digest,
@@ -1430,9 +1433,17 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 fee_amount,
                 observed_at,
                 recorded_at,
-                _canonical_json(dict(summary)),
+                self._safe_canonical_json(dict(summary)),
             ),
         )
+
+    def _safe_string(self, value: str) -> str:
+        """Serialize one bounded audit value after central output redaction."""
+        return self._redactor.redact(value)
+
+    def _safe_canonical_json(self, value: Any) -> str:
+        """Canonicalize a redacted, JSON-compatible audit value."""
+        return _canonical_json(self._redactor.redact(value))
 
     def _load_admission(self, logical_command_key: str) -> SubmissionAdmission | None:
         """Load persisted identities for a repeat without allocating any new authority."""

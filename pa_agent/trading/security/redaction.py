@@ -22,6 +22,8 @@ _SENSITIVE_QUERY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_OUTPUT_REDACTOR = None
+
 
 class SecretRedactor:
     """Redacts registered values and sensitive shapes from nested output data."""
@@ -61,3 +63,11 @@ class SecretRedactor:
         for secret in self._values:
             redacted = redacted.replace(secret, REDACTION_TOKEN)
         return _SENSITIVE_QUERY_PATTERN.sub(r"\1" + REDACTION_TOKEN, redacted)
+
+
+def output_redactor() -> SecretRedactor:
+    """Return the process-wide redactor used by every trading output producer."""
+    global _OUTPUT_REDACTOR
+    if _OUTPUT_REDACTOR is None:
+        _OUTPUT_REDACTOR = SecretRedactor()
+    return _OUTPUT_REDACTOR

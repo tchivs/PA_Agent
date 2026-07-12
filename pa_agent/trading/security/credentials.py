@@ -5,6 +5,8 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
+from pa_agent.trading.security.redaction import output_redactor
+
 _TRADING_PERMISSION = "trade"
 _WITHDRAWAL_PERMISSION = "withdraw"
 
@@ -70,7 +72,12 @@ def deliver_trading_credentials(
     consumer: Callable[[ProviderCredentialResult], None],
 ) -> None:
     """Validate a provider result before an execution-facing consumer can receive it."""
-    consumer(validate_provider_result(result))
+    for value in result.values.values():
+        output_redactor().register(value)
+    try:
+        consumer(validate_provider_result(result))
+    except CredentialSecurityError:
+        raise CredentialSecurityError("credential_permission_rejected") from None
 
 
 class UnavailableCredentialStore:

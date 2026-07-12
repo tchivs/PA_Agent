@@ -72,6 +72,8 @@ class RiskRejectionReason(StrEnum):
     ORDER_TYPE_NOT_ALLOWED = "order_type_not_allowed"
     ORDER_NOTIONAL_LIMIT_EXCEEDED = "order_notional_limit_exceeded"
     EXPOSURE_LIMIT_EXCEEDED = "exposure_limit_exceeded"
+    PRICE_DEVIATION_LIMIT_EXCEEDED = "price_deviation_limit_exceeded"
+    BID_ASK_SLIPPAGE_LIMIT_EXCEEDED = "bid_ask_slippage_limit_exceeded"
     OPEN_ORDER_LIMIT_EXCEEDED = "open_order_limit_exceeded"
     ORDER_RATE_LIMIT_EXCEEDED = "order_rate_limit_exceeded"
     REALIZED_LOSS_LIMIT_EXCEEDED = "realized_loss_limit_exceeded"

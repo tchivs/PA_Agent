@@ -52,6 +52,8 @@ class RiskPolicy:
     order_types: frozenset[OrderType]
     maximum_order_notional: Decimal | str
     maximum_total_exposure: Decimal | str
+    maximum_price_deviation: Decimal | str
+    maximum_bid_ask_slippage: Decimal | str
     maximum_open_orders: int
     maximum_accepted_orders: int
     order_rate_window_seconds: int
@@ -64,6 +66,8 @@ class RiskPolicy:
         for name in (
             "maximum_order_notional",
             "maximum_total_exposure",
+            "maximum_price_deviation",
+            "maximum_bid_ask_slippage",
             "maximum_utc_day_realized_loss",
             "maximum_utc_day_drawdown",
         ):
@@ -78,6 +82,8 @@ class RiskPolicy:
             or self.order_types != frozenset({OrderType.MARKET, OrderType.LIMIT})
             or self.maximum_order_notional != Decimal("1000")
             or self.maximum_total_exposure != Decimal("1000")
+            or self.maximum_price_deviation != Decimal("80")
+            or self.maximum_bid_ask_slippage != Decimal("4")
             or self.maximum_open_orders != 3
             or self.maximum_accepted_orders != 5
             or self.order_rate_window_seconds != 60
@@ -99,6 +105,8 @@ class RiskPolicy:
             "order_types": tuple(sorted(self.order_types)),
             "maximum_order_notional": self.maximum_order_notional,
             "maximum_total_exposure": self.maximum_total_exposure,
+            "maximum_price_deviation": self.maximum_price_deviation,
+            "maximum_bid_ask_slippage": self.maximum_bid_ask_slippage,
             "maximum_open_orders": self.maximum_open_orders,
             "maximum_accepted_orders": self.maximum_accepted_orders,
             "order_rate_window_seconds": self.order_rate_window_seconds,
@@ -145,6 +153,8 @@ def select_phase2_policy(target: ExecutionTarget) -> RiskPolicy:
         order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}),
         maximum_order_notional=Decimal("1000"),
         maximum_total_exposure=Decimal("1000"),
+        maximum_price_deviation=Decimal("80"),
+        maximum_bid_ask_slippage=Decimal("4"),
         maximum_open_orders=3,
         maximum_accepted_orders=5,
         order_rate_window_seconds=60,

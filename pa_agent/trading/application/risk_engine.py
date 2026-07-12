@@ -100,6 +100,13 @@ class RiskEngine:
             reasons.append(RiskRejectionReason.EXPOSURE_LIMIT_EXCEEDED)
 
         expected_quote_price = evidence.quote.ask if candidate.side is Side.BUY else evidence.quote.bid
+        price_deviation = abs(price - expected_quote_price)
+        slippage = abs(evidence.quote.ask - evidence.quote.bid)
+        if price_deviation > policy.maximum_price_deviation:
+            reasons.append(RiskRejectionReason.PRICE_DEVIATION_LIMIT_EXCEEDED)
+        if slippage > policy.maximum_bid_ask_slippage:
+            reasons.append(RiskRejectionReason.BID_ASK_SLIPPAGE_LIMIT_EXCEEDED)
+
         fee_estimate = None
         if evidence.fee_rate.symbol != candidate.symbol:
             reasons.append(RiskRejectionReason.FEE_EVIDENCE_SYMBOL_MISMATCH)
@@ -120,8 +127,8 @@ class RiskEngine:
         metrics = (
             ("order_notional", notional),
             ("expected_quote_price", expected_quote_price),
-            ("price_deviation", abs(price - expected_quote_price)),
-            ("slippage", abs(evidence.quote.ask - evidence.quote.bid)),
+            ("price_deviation", price_deviation),
+            ("slippage", slippage),
             ("existing_exposure", existing_exposure),
             ("projected_exposure", projected_exposure),
         )

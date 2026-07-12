@@ -125,6 +125,7 @@ class ApprovalTicketStatus(StrEnum):
     """The local review lifecycle for a not-yet-authoritative approval ticket."""
 
     PENDING = "pending"
+    CONSUMED = "consumed"
     REJECTED = "rejected"
     EXPIRED = "expired"
     INVALIDATED = "invalidated"

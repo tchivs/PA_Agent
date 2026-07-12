@@ -163,6 +163,19 @@ class ExecutionLedger(Protocol):
         request fails closed.
         """
 
+    def consume_valid_ticket_and_begin_outbound(
+        self,
+        ticket_id: str,
+        candidate: CandidateExecutionIntent,
+        policy: object,
+        evidence: EvidenceBundle,
+        assessment: RiskAssessment,
+    ) -> OutboundSubmission | None:
+        """Atomically consume one current ticket into its only outbound authority."""
+
+    def mark_outbound_submission_ambiguous(self, outbound: OutboundSubmission) -> None:
+        """Record local ambiguity for an already-authorized outbound submission."""
+
     def record_account_observation(self, observation: AccountObservation) -> str:
         """Persist one explicit typed canonical account observation and return its ID."""
 

@@ -44,7 +44,12 @@ from pa_agent.trading.domain.models import (
     canonicalize,
     decimal_to_canonical,
 )
-from pa_agent.trading.domain.risk import EvidenceBundle, RiskAssessment, select_phase2_policy
+from pa_agent.trading.domain.risk import (
+    EvidenceBundle,
+    RiskAssessment,
+    RiskPolicy,
+    select_phase2_policy,
+)
 from pa_agent.trading.persistence.sqlite_connection import (
     LedgerStorageError,
     bootstrap_sqlite_connection,
@@ -228,6 +233,154 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 outbound_attempt_token=_new_id("outbound-attempt"),
             )
 
+    def consume_valid_ticket_and_begin_outbound(
+        self,
+        ticket_id: str,
+        candidate: CandidateExecutionIntent,
+        policy: object,
+        evidence: EvidenceBundle,
+        assessment: RiskAssessment,
+    ) -> OutboundSubmission | None:
+        """Consume a re-evidenced ticket and start outbound authority in one transaction."""
+        if (
+            type(candidate) is not CandidateExecutionIntent
+            or type(policy) is not RiskPolicy
+            or type(evidence) is not EvidenceBundle
+            or type(assessment) is not RiskAssessment
+        ):
+            raise TypeError("ticket consumption requires canonical current candidate, policy, evidence, and risk")
+        if not assessment.accepted or assessment.fee_estimate is None:
+            raise LedgerStorageError("rejected current risk cannot consume an approval ticket")
+        fresh_binding = TicketBinding.from_persisted_facts(
+            candidate=candidate,
+            policy=policy,
+            evidence_digest=evidence.evidence_digest,
+            quote_observed_at=evidence.quote.observed_at,
+            fee_estimate=assessment.fee_estimate,
+            risk_reason_codes=assessment.reason_codes,
+            risk_metrics=assessment.metrics,
+        )
+        connection = self._require_connection()
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT ticket_id, binding_json, status, created_at_utc, expires_at_utc,
+                       terminal_event, terminal_reason, terminal_at_utc
+                FROM approval_tickets WHERE ticket_id = ?
+                """,
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            ticket = _ticket_from_row(row)
+            if ticket.status is not ApprovalTicketStatus.PENDING:
+                return None
+            if self.utc_now() > ticket.expires_at:
+                self._terminate_ticket_in_transaction(
+                    ticket, TicketTerminalEvent.EXPIRED, "approval_ticket_expired"
+                )
+                return None
+            if ticket.binding != fresh_binding:
+                self._terminate_ticket_in_transaction(
+                    ticket,
+                    TicketTerminalEvent.BINDING_INVALIDATED,
+                    "current_ticket_binding_mismatch",
+                    fresh_binding,
+                )
+                return None
+            consumed = connection.execute(
+                "UPDATE approval_tickets SET status = ? WHERE ticket_id = ? AND status = ?",
+                (ApprovalTicketStatus.CONSUMED.value, ticket_id, ApprovalTicketStatus.PENDING.value),
+            )
+            if consumed.rowcount != 1:
+                return None
+            self._append_approval_ticket_event(
+                ticket=ticket,
+                event_type="consumed",
+                reason="current_evidence_and_risk_verified",
+                actor_label="approval_service",
+                occurred_at=self.utc_now(),
+            )
+            command_id = f"ticket-command-{ticket_id}"
+            logical_command_key = f"approval-ticket:{ticket_id}"
+            client_order_id = _new_id("client-order")
+            command = ExecutionCommand(
+                command_id=command_id,
+                logical_command_key=logical_command_key,
+                client_order_id=client_order_id,
+                mode=candidate.target.mode,
+                account_id=candidate.target.account_id,
+                symbol=candidate.symbol,
+                side=candidate.side,
+                order_type=candidate.order_type,
+                quantity=candidate.quantity,
+                price=candidate.price,
+                context=SpotOrderContext(),
+            )
+            now = _timestamp_text(self.utc_now())
+            submitting = assert_transition(OrderState.PROPOSED, LifecycleEvent.SUBMIT_REQUESTED)
+            job_id = _new_id("reconciliation")
+            claim_token = _new_id("claim-token")
+            connection.execute(
+                """
+                INSERT INTO order_commands(
+                    command_id, logical_command_key, client_order_id, command_json,
+                    mode, product, account_id, symbol, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    command.command_id,
+                    command.logical_command_key,
+                    command.client_order_id,
+                    _canonical_json(command.to_canonical_dict()),
+                    command.mode.value,
+                    command.context.product.value,
+                    command.account_id,
+                    command.symbol,
+                    now,
+                ),
+            )
+            self._append_event(
+                command_id=command.command_id,
+                previous_state=OrderState.PROPOSED,
+                new_state=submitting,
+                event=LifecycleEvent.SUBMIT_REQUESTED,
+                occurred_at=now,
+                detail={"source": "approval_ticket", "ticket_id": ticket_id},
+            )
+            connection.execute(
+                """
+                INSERT INTO orders(
+                    command_id, exchange_order_id, lifecycle_state, filled_quantity, filled_notional,
+                    evidence_cursor
+                ) VALUES (?, NULL, ?, ?, ?, NULL)
+                """,
+                (command.command_id, submitting.value, "0", "0"),
+            )
+            connection.execute(
+                """
+                INSERT INTO reconciliation_jobs(
+                    job_id, command_id, reason, status, attempt_count, next_action_at_utc
+                ) VALUES (?, ?, ?, ?, 0, ?)
+                """,
+                (job_id, command.command_id, "submission_pending", "queued", now),
+            )
+            connection.execute(
+                """
+                INSERT INTO submission_claims(claim_id, command_id, claim_token, admitted_at_utc, status)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (_new_id("claim"), command.command_id, claim_token, now, "outbound_started"),
+            )
+            self._inject_failure("before_ticket_consumption")
+            return OutboundSubmission(
+                command=command,
+                command_id=command.command_id,
+                client_order_id=client_order_id,
+                reconciliation_job_id=job_id,
+                outbound_attempt_token=_new_id("outbound-attempt"),
+            )
+
     def mark_submission_ambiguous(
         self,
         admission: SubmissionAdmission,
@@ -307,6 +460,33 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 )
                 if consumed.rowcount != 1:
                     raise LedgerStorageError("submission claim could not be consumed")
+
+    def mark_outbound_submission_ambiguous(self, outbound: OutboundSubmission) -> None:
+        """Retain recovery work after an authorized outbound gateway exception."""
+        if type(outbound) is not OutboundSubmission:
+            raise TypeError("outbound ambiguity requires a ledger-produced outbound submission")
+        row = self._require_connection().execute(
+            """
+            SELECT claims.claim_token, orders.lifecycle_state
+            FROM submission_claims AS claims
+            JOIN orders ON orders.command_id = claims.command_id
+            JOIN reconciliation_jobs AS jobs ON jobs.command_id = claims.command_id
+            WHERE claims.command_id = ? AND jobs.job_id = ? AND claims.status = ?
+            """,
+            (outbound.command_id, outbound.reconciliation_job_id, "outbound_started"),
+        ).fetchone()
+        if row is None or outbound.client_order_id != outbound.command.client_order_id:
+            raise LedgerStorageError("outbound submission does not match durable authorization")
+        self.mark_submission_ambiguous(
+            SubmissionAdmission(
+                command_id=outbound.command_id,
+                client_order_id=outbound.client_order_id,
+                reconciliation_job_id=outbound.reconciliation_job_id,
+                lifecycle_state=OrderState(row[1]),
+                is_admissible=True,
+                claim_token=row[0],
+            )
+        )
 
     def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
         """Load queued non-terminal work using the first persisted identities."""
@@ -878,6 +1058,46 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 binding=binding,
             )
             return terminal
+
+    def _terminate_ticket_in_transaction(
+        self,
+        ticket: ApprovalTicket,
+        event: TicketTerminalEvent,
+        reason: str,
+        binding: TicketBinding | None = None,
+    ) -> ApprovalTicket:
+        """Append a conditional terminal event while the caller owns one immediate transaction."""
+        if event is TicketTerminalEvent.BINDING_INVALIDATED and (
+            binding is None or not ticket.requires_invalidation(binding)
+        ):
+            raise LedgerStorageError("invalidation requires a changed binding snapshot")
+        terminal = ticket.terminate(event=event, reason=reason, occurred_at=self.utc_now())
+        changed = self._require_connection().execute(
+            """
+            UPDATE approval_tickets
+            SET status = ?, terminal_event = ?, terminal_reason = ?, terminal_at_utc = ?
+            WHERE ticket_id = ? AND status = ?
+            """,
+            (
+                terminal.status.value,
+                event.value,
+                reason,
+                _timestamp_text(terminal.terminal_at),
+                ticket.ticket_id,
+                ApprovalTicketStatus.PENDING.value,
+            ),
+        )
+        if changed.rowcount != 1:
+            raise LedgerStorageError("approval ticket is no longer pending")
+        self._append_approval_ticket_event(
+            ticket=terminal,
+            event_type=event.value,
+            reason=reason,
+            actor_label="system",
+            occurred_at=terminal.terminal_at,
+            binding=binding,
+        )
+        return terminal
 
     def _load_ticket_for_binding(
         self, candidate: CandidateExecutionIntent, assessment: RiskAssessment

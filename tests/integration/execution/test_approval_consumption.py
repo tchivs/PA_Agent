@@ -32,7 +32,10 @@ from pa_agent.trading.domain.risk import (
     TargetConnectionObservation,
     select_phase2_policy,
 )
-from pa_agent.trading.persistence.sqlite_connection import LedgerStorageError, open_sqlite_connection
+from pa_agent.trading.persistence.sqlite_connection import (
+    LedgerStorageError,
+    open_sqlite_connection,
+)
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
 from pa_agent.trading.ports.gateway import GatewayUnavailableError
 from pa_agent.trading.ports.ledger import OutboundSubmission
@@ -194,7 +197,11 @@ def test_concurrent_current_ticket_consumption_returns_one_outbound_and_one_gate
 
     outbound = next(result for result in outbounds if result is not None)
     assert sum(result is not None for result in outbounds) == 1
-    SubmissionCoordinator(gateway=gateway).submit(outbound)
+    outbound_ledger = SQLiteExecutionLedger(execution_database_path, clock=clock)
+    try:
+        SubmissionCoordinator(ledger=outbound_ledger, gateway=gateway).submit(outbound)
+    finally:
+        outbound_ledger.close()
     assert _row_counts(execution_database_path) == {
         "approval_tickets": 1,
         "approval_ticket_events": 2,

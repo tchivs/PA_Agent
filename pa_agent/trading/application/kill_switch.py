@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from pa_agent.trading.application.recovery_assessment import RecoveryAssessmentService
+from pa_agent.trading.application.zero_scope_clearance import ZeroScopeClearanceCollector
 from pa_agent.trading.domain.approval import CancellationWork, KillSwitchState
 from pa_agent.trading.ports.gateway import TradingGateway
 from pa_agent.trading.ports.ledger import ExecutionLedger
@@ -20,12 +21,17 @@ class KillSwitchService:
         gateway: TradingGateway,
         utc_now: Callable[[], datetime],
         recovery_assessment_service: RecoveryAssessmentService | None = None,
+        zero_scope_clearance_collector: ZeroScopeClearanceCollector | None = None,
     ) -> None:
         self._ledger = ledger
         self._gateway = gateway
         self._utc_now = utc_now
         self._recovery_assessment_service = recovery_assessment_service or RecoveryAssessmentService(
             ledger=ledger, gateway=gateway, utc_now=utc_now
+        )
+        self._zero_scope_clearance_collector = (
+            zero_scope_clearance_collector
+            or ZeroScopeClearanceCollector(gateway=gateway, utc_now=utc_now)
         )
 
     def latch(
@@ -68,11 +74,24 @@ class KillSwitchService:
         self, actor_label: str, *, assessment_ids: tuple[str, ...] | None = None
     ) -> bool:
         """Persist one fresh restricted assessment per durable scope before recovery."""
+        scopes = self._ledger.list_kill_switch_recovery_scopes()
+        if not scopes:
+            if assessment_ids not in (None, ()):
+                return False
+            proof = self._zero_scope_clearance_collector.collect()
+            if proof is None:
+                return False
+            try:
+                return self._ledger.begin_kill_switch_recovery(
+                    actor_label, assessment_ids=(), zero_scope_proof=proof
+                )
+            except Exception:
+                return False
         ids = assessment_ids
         if ids is None:
             persisted_ids: list[str] = []
             try:
-                for scope in self._ledger.list_kill_switch_recovery_scopes():
+                for scope in scopes:
                     persisted = self._recovery_assessment_service.assess_and_record(scope)
                     if persisted is None or persisted.recovery_assessment_id is None:
                         return False
@@ -85,8 +104,25 @@ class KillSwitchService:
         except Exception:
             return False
 
-    def complete_recovery(self, actor_label: str, *, assessment_ids: tuple[str, ...]) -> bool:
+    def complete_recovery(
+        self, actor_label: str, *, assessment_ids: tuple[str, ...] | None = None
+    ) -> bool:
         """Require explicit operator action and independently validated clearance IDs."""
+        scopes = self._ledger.list_kill_switch_recovery_scopes()
+        if not scopes:
+            if assessment_ids not in (None, ()):
+                return False
+            proof = self._zero_scope_clearance_collector.collect()
+            if proof is None:
+                return False
+            try:
+                return self._ledger.complete_kill_switch_recovery(
+                    actor_label, assessment_ids=(), zero_scope_proof=proof
+                )
+            except Exception:
+                return False
+        if assessment_ids is None:
+            return False
         try:
             return self._ledger.complete_kill_switch_recovery(actor_label, assessment_ids=assessment_ids)
         except Exception:

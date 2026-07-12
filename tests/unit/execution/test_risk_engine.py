@@ -115,6 +115,69 @@ def test_phase2_policy_binds_fixed_total_exposure_in_its_digest_material() -> No
     assert policy.policy_digest
 
 
+def test_phase2_policy_binds_fixed_price_and_slippage_limits_in_digest_material() -> None:
+    policy = select_phase2_policy(make_execution_target())
+
+    assert policy.maximum_price_deviation == Decimal("80")
+    assert policy.maximum_bid_ask_slippage == Decimal("4")
+    assert policy._digest_material()["maximum_price_deviation"] == Decimal("80")
+    assert policy._digest_material()["maximum_bid_ask_slippage"] == Decimal("4")
+    assert policy.policy_digest
+
+
+@pytest.mark.parametrize(
+    ("candidate_price", "quote", "accepted", "reason"),
+    (
+        (
+            "8080",
+            QuoteObservation(symbol="BTCUSDT", bid="7999.50", ask="8000", observed_at=NOW),
+            True,
+            None,
+        ),
+        (
+            "8080.50",
+            QuoteObservation(symbol="BTCUSDT", bid="7999.50", ask="8000", observed_at=NOW),
+            False,
+            RiskRejectionReason.PRICE_DEVIATION_LIMIT_EXCEEDED,
+        ),
+        (
+            "8000",
+            QuoteObservation(symbol="BTCUSDT", bid="7996", ask="8000", observed_at=NOW),
+            True,
+            None,
+        ),
+        (
+            "8000",
+            QuoteObservation(symbol="BTCUSDT", bid="7995.50", ask="8000", observed_at=NOW),
+            False,
+            RiskRejectionReason.BID_ASK_SLIPPAGE_LIMIT_EXCEEDED,
+        ),
+    ),
+)
+def test_risk_engine_enforces_price_deviation_and_bid_ask_slippage_boundaries(
+    candidate_price: str,
+    quote: QuoteObservation,
+    accepted: bool,
+    reason: RiskRejectionReason | None,
+) -> None:
+    target = make_execution_target()
+    candidate = make_candidate_execution_intent(price=candidate_price, quantity="0.100")
+    assessment = RiskEngine().assess(
+        candidate,
+        target,
+        select_phase2_policy(target),
+        make_evidence_bundle(quote=quote),
+    )
+
+    assert assessment.accepted is accepted
+    if reason is not None:
+        assert assessment.reason_codes == (reason,)
+    assert dict(assessment.metrics)["price_deviation"] == abs(
+        Decimal(candidate_price) - quote.ask
+    )
+    assert dict(assessment.metrics)["slippage"] == abs(quote.ask - quote.bid)
+
+
 def test_risk_engine_accepts_projected_exposure_at_the_fixed_boundary() -> None:
     assessment = assess()
 

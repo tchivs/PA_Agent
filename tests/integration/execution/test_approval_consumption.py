@@ -19,6 +19,7 @@ from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
     InstrumentRules,
+    Position,
     ProductType,
     QuoteObservation,
     RuleObservation,
@@ -62,8 +63,16 @@ class _Clock:
 class _EvidenceAndSubmissionGateway:
     """Offline fresh-evidence fake that records the only permitted outbound shape."""
 
-    def __init__(self, *, fail_refresh: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_refresh: bool = False,
+        account_position_sequence: tuple[tuple[Position, ...], ...] | None = None,
+    ) -> None:
         self.fail_refresh = fail_refresh
+        self._account_position_sequence = (
+            list(account_position_sequence) if account_position_sequence is not None else None
+        )
         self.call_order: list[str] = []
         self.outbound_submissions: list[OutboundSubmission] = []
 
@@ -82,12 +91,17 @@ class _EvidenceAndSubmissionGateway:
 
     def get_account_snapshot(self, account_id: str, product: ProductType) -> object:
         self._record("account")
+        positions = ()
+        if self._account_position_sequence is not None:
+            if not self._account_position_sequence:
+                raise AssertionError("unexpected account lookup")
+            positions = self._account_position_sequence.pop(0)
         return make_account_observation(
             account_id=account_id,
             product=product,
             observed_at=NOW,
             balances=(Balance("USDT", "2000", "1500", "0"),),
-            positions=(),
+            positions=positions,
         )
 
     def get_quote(self, symbol: str) -> QuoteObservation:
@@ -246,6 +260,53 @@ def test_noncurrent_ticket_attempts_terminate_without_claim_or_gateway_submissio
             (ticket.ticket_id,),
         ).fetchone()[0]
         assert event_type == ("expired" if mode == "expired" else "binding_invalidated")
+    finally:
+        connection.close()
+
+
+def test_refreshed_over_limit_exposure_invalidates_ticket_before_outbound_authority(
+    execution_database_path: Path,
+) -> None:
+    """A current ticket cannot authorize work after fresh exposure becomes excessive."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway(
+        account_position_sequence=(
+            (),
+            (
+                Position(
+                    symbol="BTCUSDT",
+                    quantity="0.001",
+                    entry_price="8000",
+                    mark_price="8000",
+                    unrealized_pnl="0",
+                    margin="0",
+                ),
+            ),
+        )
+    )
+    ticket, candidate, policy = _issue_ticket(execution_database_path, clock, gateway)
+    service = _consumer(execution_database_path, clock, gateway)
+    try:
+        result = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+    finally:
+        service.close()
+
+    assert result is None
+    assert _row_counts(execution_database_path) == {
+        "approval_tickets": 1,
+        "approval_ticket_events": 2,
+        "order_commands": 0,
+        "submission_claims": 0,
+    }
+    assert gateway.outbound_submissions == []
+    connection = open_sqlite_connection(execution_database_path)
+    try:
+        event_type, reason = connection.execute(
+            "SELECT event_type, reason FROM approval_ticket_events "
+            "WHERE ticket_id = ? ORDER BY rowid DESC",
+            (ticket.ticket_id,),
+        ).fetchone()
+        assert (event_type, reason) == ("binding_invalidated", "risk_reassessment_rejected")
     finally:
         connection.close()
 

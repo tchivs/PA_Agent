@@ -28,10 +28,12 @@ import base64
 import hashlib
 import hmac
 import logging
-import time
 import threading
+import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from pa_agent.trading.security.redaction import output_redactor
 
 if TYPE_CHECKING:
     from pa_agent.config.settings import Settings
@@ -323,6 +325,10 @@ def send_order_signal(
         发送成功返回 True，失败或未启用返回 False。
     """
     cfg = _feishu_config_dict(settings)
+    redactor = output_redactor()
+    for value in cfg.values():
+        if isinstance(value, str):
+            redactor.register(value)
 
     if not cfg.get("enabled", True):
         logger.debug("飞书通知已禁用（settings.json feishu.enabled=false）")
@@ -362,8 +368,8 @@ def send_order_signal(
 
     # ── 构建消息体 ──────────────────────────────────────────────────────────
     payload = _build_card(
-        decision_inner=decision_inner,
-        stage2_full=stage2_full,
+        decision_inner=redactor.redact(decision_inner),
+        stage2_full=redactor.redact(stage2_full),
         symbol=symbol,
         timeframe=timeframe,
         image_key=image_key,
@@ -384,7 +390,7 @@ def send_order_signal(
             headers={"Content-Type": "application/json"},
             timeout=_REQUEST_TIMEOUT_S,
         )
-        result = resp.json()
+        result = redactor.redact(resp.json())
         # 飞书返回 code=0 或 StatusCode=0 均为成功
         if result.get("code") == 0 or result.get("StatusCode") == 0:
             logger.info(
@@ -403,5 +409,5 @@ def send_order_signal(
             )
             return False
     except Exception as exc:
-        logger.warning("飞书通知 HTTP 请求失败: %s", exc)
+        logger.warning("飞书通知 HTTP 请求失败: %s", redactor.redact(exc))
         return False

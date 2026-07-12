@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from pa_agent.trading.security.redaction import output_redactor
+
 logger = logging.getLogger(__name__)
 
 _TRADE_RECORDS_DIR = Path("trade_records")
@@ -446,9 +448,9 @@ def save_trade_record(
     """
     try:
         _save_trade_record_impl(
-            decision_inner=decision_inner,
-            stage2_full=stage2_full,
-            stage1_diagnosis=stage1_diagnosis,
+            decision_inner=output_redactor().redact(decision_inner),
+            stage2_full=output_redactor().redact(stage2_full),
+            stage1_diagnosis=output_redactor().redact(stage1_diagnosis),
             frame=frame,
             meta_symbol=meta_symbol,
             meta_timeframe=meta_timeframe,
@@ -457,7 +459,7 @@ def save_trade_record(
             structure_flip_cooldown_bars=structure_flip_cooldown_bars,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.error("save_trade_record failed: %s", exc, exc_info=True)
+        logger.error("save_trade_record failed: %s", output_redactor().redact(exc))
 
 
 def _save_trade_record_impl(
@@ -517,7 +519,7 @@ def _save_trade_record_impl(
                 estimated_win_rate=str(dec.get("estimated_win_rate") or ""),
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("chart render failed: %s", exc)
+            logger.warning("chart render failed: %s", output_redactor().redact(exc))
 
     # ── Decision trace summary (node_id + answer, compact) ───────────────────
     trace = stage2_full.get("decision_trace") or []

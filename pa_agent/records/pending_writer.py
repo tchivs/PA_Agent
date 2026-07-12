@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from pa_agent.records.schema import AnalysisRecord, FollowupTurn
-from pa_agent.util.mask_secret import mask_secret
+from pa_agent.trading.security.redaction import output_redactor
 
 
 def _default_logger() -> logging.Logger:
@@ -54,6 +54,8 @@ class PendingWriter:
         self._event_bus = event_bus
         self._logger = logger or _default_logger()
         self._api_key = api_key
+        if api_key:
+            output_redactor().register(api_key)
 
         try:
             self._pending_dir.mkdir(parents=True, exist_ok=True)
@@ -119,7 +121,7 @@ class PendingWriter:
         e.g. ``"2026-05-18_14-00-13_XAUUSD_1h"``.
         """
         path = self._pending_dir / f"{record_id}.followups.jsonl"
-        line = json.dumps(turn.model_dump(), ensure_ascii=False)
+        line = json.dumps(output_redactor().redact(turn.model_dump()), ensure_ascii=False)
         try:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
@@ -132,26 +134,10 @@ class PendingWriter:
 
     @staticmethod
     def _sanitize(data: dict, api_key: str) -> dict:
-        """Recursively replace any occurrence of *api_key* in string values.
-
-        If *api_key* is empty, returns *data* unchanged.
-        Handles nested dicts, lists, and plain string values at any depth.
-        """
-        if not api_key:
-            return data
-
-        masked = mask_secret(api_key)
-
-        def _walk(node):
-            if isinstance(node, str):
-                return node.replace(api_key, masked)
-            if isinstance(node, dict):
-                return {k: _walk(v) for k, v in node.items()}
-            if isinstance(node, list):
-                return [_walk(item) for item in node]
-            return node
-
-        return _walk(data)
+        """Apply the trading output boundary before JSON serialization."""
+        if api_key:
+            output_redactor().register(api_key)
+        return output_redactor().redact(data)
 
     def _write_json(self, path: Path, data: dict) -> None:
         """Write *data* as pretty-printed JSON to *path*, handling errors."""
@@ -171,5 +157,5 @@ class PendingWriter:
                 self._event_bus.emit("disk_error", {"path": str(path), "error": str(exc)})
             except Exception as bus_exc:  # noqa: BLE001
                 self._logger.error(
-                    "PendingWriter: event_bus emit failed: %s", bus_exc
+                "PendingWriter: event_bus emit failed: %s", output_redactor().redact(bus_exc)
                 )

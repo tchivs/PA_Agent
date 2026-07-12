@@ -14,13 +14,10 @@ import pytest
 from pydantic import ValidationError
 
 from pa_agent.config.settings import Settings, TradingSettings, load_settings, save_settings
-from pa_agent.trading.security.credentials import (
-    CredentialReference,
-    CredentialSecurityError,
-    ProviderCredentialResult,
-    deliver_trading_credentials,
-)
-from pa_agent.trading.security.redaction import REDACTION_TOKEN, SecretRedactor
+from pa_agent.notify import feishu_notifier, pushplus_notifier
+from pa_agent.records import trade_logger
+from pa_agent.records.pending_writer import PendingWriter
+from pa_agent.records.schema import AnalysisRecord, RecordMeta
 from pa_agent.trading.application.evidence_collector import FreshEvidenceCollector
 from pa_agent.trading.application.intent_factory import IntentFactory
 from pa_agent.trading.application.proposal import ProposalService
@@ -43,11 +40,14 @@ from pa_agent.trading.domain.risk import (
     select_phase2_policy,
 )
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
+from pa_agent.trading.security.credentials import (
+    CredentialReference,
+    CredentialSecurityError,
+    ProviderCredentialResult,
+    deliver_trading_credentials,
+)
+from pa_agent.trading.security.redaction import REDACTION_TOKEN, SecretRedactor
 from pa_agent.util.logging import MaskingFormatter
-from pa_agent.records.pending_writer import PendingWriter
-from pa_agent.records.schema import AnalysisRecord, RecordMeta
-from pa_agent.records import trade_logger
-from pa_agent.notify import feishu_notifier, pushplus_notifier
 from tests.fixtures.execution_factories import (
     make_account_observation,
     make_analysis_recommendation,
@@ -135,6 +135,27 @@ def _assert_no_secret(rendered: str) -> None:
         assert secret not in rendered
 
 
+def _register_synthetic_credentials() -> None:
+    """Register every injected value through the public credential failure path."""
+    with pytest.raises(CredentialSecurityError):
+        deliver_trading_credentials(
+            ProviderCredentialResult(
+                reference=CredentialReference(provider="environment", reference_id="paper-spot-default"),
+                values={
+                    "api_key": API_KEY,
+                    "secret": API_SECRET,
+                    "passphrase": PASSPHRASE,
+                    "signature": SIGNATURE,
+                    "authorization": AUTHORIZATION,
+                    "query": QUERY_SECRET,
+                    "diagnostic": EXCEPTION_SECRET,
+                },
+                declared_permissions=frozenset({"trade", "withdraw"}),
+            ),
+            lambda _: None,
+        )
+
+
 def _gateway() -> ScriptedEvidenceGateway:
     target = make_execution_target()
     return ScriptedEvidenceGateway(
@@ -153,22 +174,7 @@ def _gateway() -> ScriptedEvidenceGateway:
 
 def test_proposal_service_and_sqlite_audit_do_not_persist_injected_secret_material(tmp_path: Path) -> None:
     """The real proposal/audit path persists canonical facts, not source secret text."""
-    with pytest.raises(CredentialSecurityError):
-        deliver_trading_credentials(
-            ProviderCredentialResult(
-                reference=CredentialReference(provider="environment", reference_id="paper-spot-default"),
-                values={
-                    "api_key": API_KEY,
-                    "secret": API_SECRET,
-                    "passphrase": PASSPHRASE,
-                    "signature": SIGNATURE,
-                    "authorization": AUTHORIZATION,
-                    "query": QUERY_SECRET,
-                },
-                declared_permissions=frozenset({"trade", "withdraw"}),
-            ),
-            lambda _: None,
-        )
+    _register_synthetic_credentials()
     database = tmp_path / "execution.sqlite3"
     ledger = SQLiteExecutionLedger(database)
     target = make_execution_target()
@@ -199,6 +205,7 @@ def test_proposal_service_and_sqlite_audit_do_not_persist_injected_secret_materi
 
 def test_masking_formatter_redacts_registered_values_and_exception_text() -> None:
     """Configured root-format output cannot retain sensitive message or exception data."""
+    _register_synthetic_credentials()
     formatter = MaskingFormatter("%(message)s", api_key=API_KEY)
     record = logging.LogRecord(
         "secret-test", logging.ERROR, __file__, 1,
@@ -232,6 +239,7 @@ def _analysis_record() -> AnalysisRecord:
 
 def test_pending_writer_generated_json_does_not_retain_secrets(tmp_path: Path) -> None:
     """PendingWriter sanitizes the concrete JSON file it produces."""
+    _register_synthetic_credentials()
     path = PendingWriter(pending_dir=tmp_path, api_key=API_KEY).save_full(_analysis_record())
 
     rendered = path.read_text(encoding="utf-8")
@@ -241,6 +249,7 @@ def test_pending_writer_generated_json_does_not_retain_secrets(tmp_path: Path) -
 
 def test_trade_logger_generated_csv_does_not_retain_decision_secrets(tmp_path: Path) -> None:
     """save_trade_record sanitizes its concrete CSV output before writing it."""
+    _register_synthetic_credentials()
     decision = {
         "reasoning": f"{API_KEY} {API_SECRET} {PASSPHRASE} {SIGNATURE} {QUERY_SECRET}",
         "watch_points": [AUTHORIZATION, EXCEPTION_SECRET],
@@ -262,6 +271,7 @@ def test_trade_logger_generated_csv_does_not_retain_decision_secrets(tmp_path: P
 
 def test_feishu_and_pushplus_payloads_do_not_forward_secret_bearing_decisions() -> None:
     """Both real notification entry points produce advisory-only redacted payloads."""
+    _register_synthetic_credentials()
     requests = SimpleNamespace(post=lambda *_args, **_kwargs: SimpleNamespace(json=lambda: {"code": 0}))
     captured: list[dict[str, object]] = []
 
@@ -271,8 +281,8 @@ def test_feishu_and_pushplus_payloads_do_not_forward_secret_bearing_decisions() 
 
     requests.post = post
     decision = {"reasoning": " ".join(SECRETS), "watch_points": list(SECRETS)}
-    feishu_settings = SimpleNamespace(feishu=SimpleNamespace(model_dump=lambda: {"enabled": True, "webhook_url": "https://example.invalid", "secret": API_SECRET}))
-    pushplus_settings = SimpleNamespace(pushplus=SimpleNamespace(model_dump=lambda: {"enabled": True, "token": API_KEY}))
+    feishu_settings = SimpleNamespace(feishu=SimpleNamespace(model_dump=lambda: {"enabled": True, "webhook_url": "https://example.invalid", "secret": "feishu-transport-secret"}))
+    pushplus_settings = SimpleNamespace(pushplus=SimpleNamespace(model_dump=lambda: {"enabled": True, "token": "pushplus-transport-token"}))
     with patch.dict(sys.modules, {"requests": requests}):
         assert feishu_notifier.send_order_signal(decision_inner=decision, stage2_full={}, symbol="BTCUSDT", timeframe="1h", settings=feishu_settings) is True
         assert pushplus_notifier.send_order_signal(decision_inner=decision, stage2_full={}, symbol="BTCUSDT", timeframe="1h", settings=pushplus_settings) is True

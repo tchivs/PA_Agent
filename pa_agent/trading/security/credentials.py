@@ -84,9 +84,7 @@ class UnavailableCredentialStore:
     """Default store that fails closed until Phase 5 injects an approved provider."""
 
     def resolve(self, reference: CredentialReference) -> ProviderCredentialResult:
-        raise CredentialSecurityError(
-            f"credential provider {reference.provider!r} is unavailable in Phase 2"
-        )
+        raise CredentialSecurityError("credential_provider_unavailable")
 
 
 class EnvironmentCredentialStore:

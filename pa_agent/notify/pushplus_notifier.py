@@ -9,6 +9,8 @@ import os
 from html import escape
 from typing import TYPE_CHECKING, Any
 
+from pa_agent.trading.security.redaction import output_redactor
+
 if TYPE_CHECKING:
     from pa_agent.config.settings import Settings
 
@@ -57,10 +59,12 @@ def send_pushplus_raw(
         logger.debug("PushPlus 未配置 token，跳过推送")
         return False
 
+    redactor = output_redactor()
+    redactor.register(push_token)
     payload = {
         "token": push_token,
-        "title": title,
-        "content": html_content,
+        "title": redactor.redact(title),
+        "content": redactor.redact(html_content),
         "template": "html",
     }
     try:
@@ -75,13 +79,13 @@ def send_pushplus_raw(
             json=payload,
             timeout=_REQUEST_TIMEOUT_S,
         )
-        res = resp.json()
+        res = redactor.redact(resp.json())
         if res.get("code") == 200:
             logger.info("PushPlus 推送成功: '%s'", title)
             return True
         logger.error("PushPlus 返回异常: %s", res.get("msg"))
     except Exception as exc:
-        logger.error("发送 PushPlus 推送出错: %s", exc)
+        logger.error("发送 PushPlus 推送出错: %s", redactor.redact(exc))
     return False
 
 
@@ -162,9 +166,10 @@ def send_order_signal(
         return False
 
     title = f"PA Agent 下单信号 — {symbol} {timeframe}"
+    redactor = output_redactor()
     html_content = _build_order_html(
-        decision_inner=decision_inner,
-        stage2_full=stage2_full,
+        decision_inner=redactor.redact(decision_inner),
+        stage2_full=redactor.redact(stage2_full),
         symbol=symbol,
         timeframe=timeframe,
     )

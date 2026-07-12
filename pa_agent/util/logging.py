@@ -11,14 +11,13 @@ from __future__ import annotations
 import logging
 import logging.handlers
 from pathlib import Path
-from typing import List
 
 from pa_agent.config.paths import LOG_FILE_PATH
-from pa_agent.util.mask_secret import mask_secret
+from pa_agent.trading.security.redaction import output_redactor
 
 # ── Module-level state ────────────────────────────────────────────────────────
 
-_active_formatters: List["MaskingFormatter"] = []
+_active_formatters: list[MaskingFormatter] = []
 _configured: bool = False
 
 # ── MaskingFormatter ──────────────────────────────────────────────────────────
@@ -30,15 +29,17 @@ class MaskingFormatter(logging.Formatter):
     def __init__(self, fmt: str, api_key: str = "") -> None:
         super().__init__(fmt)
         self._api_key = api_key
+        if api_key:
+            output_redactor().register(api_key)
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: A003
         message = super().format(record)
-        if self._api_key:
-            message = message.replace(self._api_key, mask_secret(self._api_key))
-        return message
+        return output_redactor().redact(message)
 
     def set_api_key(self, new_key: str) -> None:
         self._api_key = new_key
+        if new_key:
+            output_redactor().register(new_key)
 
 
 # ── Public functions ──────────────────────────────────────────────────────────

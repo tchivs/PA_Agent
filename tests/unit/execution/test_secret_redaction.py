@@ -8,6 +8,7 @@ from pa_agent.trading.security.credentials import (
     CredentialReference,
     CredentialSecurityError,
     ProviderCredentialResult,
+    UnavailableCredentialStore,
     deliver_trading_credentials,
 )
 from pa_agent.trading.security.redaction import REDACTION_TOKEN, SecretRedactor
@@ -83,6 +84,20 @@ def test_credential_failure_exposes_only_a_controlled_reason_code() -> None:
     assert rendered == "credential_permission_rejected"
     for secret in (API_KEY, API_SECRET, PASSPHRASE):
         assert secret not in rendered
+
+
+def test_unavailable_credential_store_exposes_only_a_controlled_reason_code() -> None:
+    """The unavailable-store failure cannot disclose a caller-provided reference value."""
+    reference = CredentialReference(
+        provider=f"provider-{API_KEY}", reference_id=f"reference-{API_SECRET}"
+    )
+
+    with pytest.raises(CredentialSecurityError) as raised:
+        UnavailableCredentialStore().resolve(reference)
+
+    assert str(raised.value) == "credential_provider_unavailable"
+    assert API_KEY not in str(raised.value)
+    assert API_SECRET not in str(raised.value)
 
 
 def test_withdrawal_capable_reference_is_rejected_before_provider_lookup() -> None:

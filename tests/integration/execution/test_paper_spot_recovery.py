@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from pa_agent.trading.application.approval import ApprovalService
 from pa_agent.trading.application.risk_engine import RiskEngine
 from pa_agent.trading.application.submission import SubmissionCoordinator
@@ -36,6 +38,12 @@ from pa_agent.trading.domain.risk import (
 from pa_agent.trading.gateways.paper.gateway import PaperGateway
 from pa_agent.trading.gateways.paper.store import PaperStore
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
+from pa_agent.trading.ports.gateway import (
+    GatewayOperationObserver,
+    GatewayOperationReference,
+    GatewayOperationResult,
+    GatewayUnavailableError,
+)
 from tests.fixtures.paper_scenarios import make_observation, make_policy
 
 NOW = datetime(2026, 7, 13, tzinfo=UTC)
@@ -44,6 +52,17 @@ NOW = datetime(2026, 7, 13, tzinfo=UTC)
 class _Clock:
     def utc_now(self) -> datetime:
         return NOW
+
+
+class _RecordingOperationObserver(GatewayOperationObserver):
+    def __init__(self, *, fail: bool = False) -> None:
+        self.results: list[GatewayOperationResult] = []
+        self._fail = fail
+
+    def observe_operation(self, result: GatewayOperationResult) -> None:
+        self.results.append(result)
+        if self._fail:
+            raise RuntimeError("injected paper observer failure")
 
 
 def _target() -> ExecutionTarget:
@@ -118,8 +137,9 @@ def test_leased_spot_submission_partial_fill_cancel_and_reopen_are_paper_owned(t
     )
     gateway.advance_market(_shallow_observation())
     evidence = SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(permit)
-    assert evidence.state is OrderState.PARTIALLY_FILLED
-    assert evidence.filled_quantity == Decimal("1")
+    assert evidence.evidence is not None
+    assert evidence.evidence.state is OrderState.PARTIALLY_FILLED
+    assert evidence.evidence.filled_quantity == Decimal("1")
     client_order_id = permit.client_order_id
     command_id = permit.command_id
     assert gateway.get_account_snapshot("paper-account", ProductType.SPOT).balances == (
@@ -129,9 +149,11 @@ def test_leased_spot_submission_partial_fill_cancel_and_reopen_are_paper_owned(t
     assert gateway.list_open_orders("paper-account", ProductType.SPOT)[0].filled_quantity == Decimal("1")
 
     request = gateway.cancel_order(client_order_id)
-    assert request.state is OrderState.CANCEL_REQUESTED
+    assert request.evidence is not None
+    assert request.evidence.state is OrderState.CANCEL_REQUESTED
     terminal = gateway.resolve_cancellation(client_order_id)
-    assert terminal.state is OrderState.CANCELLED
+    assert terminal.evidence is not None
+    assert terminal.evidence.state is OrderState.CANCELLED
     assert gateway.get_account_snapshot("paper-account", ProductType.SPOT).balances[-1] == Balance("USDT", "899.799900", "899.799900", "0")
     before_close = (
         gateway.lookup_order_by_client_id(client_order_id),
@@ -166,7 +188,8 @@ def test_later_observation_can_fill_only_the_residual_order_quantity(tmp_path: P
             asks=(make_observation().asks[1],),
         )
     )
-    assert change[0].state is OrderState.FILLED
+    assert change[0].evidence is not None
+    assert change[0].evidence.state is OrderState.FILLED
     assert [fill.quantity for fill in gateway.list_fills(permit.command_id)] == [Decimal("1"), Decimal("1")]
     snapshot = gateway.get_account_snapshot("paper-account", ProductType.SPOT)
     assert snapshot.balances[-1] == Balance("USDT", "798.597799", "798.597799", "0")
@@ -182,7 +205,9 @@ def test_later_observation_wins_over_prior_cancellation_request_without_releasin
     gateway.advance_market(_shallow_observation())
     SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(permit)
 
-    assert gateway.cancel_order(permit.client_order_id).state is OrderState.CANCEL_REQUESTED
+    request = gateway.cancel_order(permit.client_order_id)
+    assert request.evidence is not None
+    assert request.evidence.state is OrderState.CANCEL_REQUESTED
     fill_change = gateway.advance_market(
         _shallow_observation(
             observation_id="btc-book-003",
@@ -190,11 +215,109 @@ def test_later_observation_wins_over_prior_cancellation_request_without_releasin
             asks=(make_observation().asks[1],),
         )
     )
-    assert fill_change[0].state is OrderState.FILLED
-    assert gateway.resolve_cancellation(permit.client_order_id).state is OrderState.FILLED
+    assert fill_change[0].evidence is not None
+    assert fill_change[0].evidence.state is OrderState.FILLED
+    terminal = gateway.resolve_cancellation(permit.client_order_id)
+    assert terminal.evidence is not None
+    assert terminal.evidence.state is OrderState.FILLED
     assert gateway.get_account_snapshot("paper-account", ProductType.SPOT).balances[-1] == Balance(
         "USDT", "798.597799", "798.597799", "0"
     )
     assert [event.sequence for event in store.list_events()][-3:] == [3, 4, 5]
     ledger.close()
     store.close()
+
+
+def test_paper_direct_controls_observe_each_committed_result_once(tmp_path: Path) -> None:
+    """Paper controls notify only after truth commits and never resubmit a leased order."""
+    ledger, permit = _leased_permit(tmp_path / "ledger.sqlite")
+    store = PaperStore(tmp_path / "paper.sqlite")
+    observer = _RecordingOperationObserver()
+    gateway = PaperGateway(
+        store,
+        policy=make_policy(),
+        initial_balances={"USDT": "1000", "BTC": "0"},
+        operation_observer=observer,
+    )
+    try:
+        gateway.advance_market(_shallow_observation())
+        submitted = SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(permit)
+        assert submitted.evidence is not None
+        assert observer.results == []
+        changes = gateway.advance_market(
+            _shallow_observation(
+                observation_id="btc-book-004",
+                version=2,
+                asks=(make_observation().asks[1],),
+            )
+        )
+        assert tuple(result.reference for result in observer.results) == tuple(
+            result.reference for result in changes
+        )
+        batch = gateway.read_operation(changes[0].reference)
+        assert batch.evidence == changes[0].evidence
+        assert batch.fills == gateway.list_fills(permit.command_id)
+        historical_batch = gateway.read_operation(submitted.reference)
+        assert historical_batch.reference == submitted.reference
+        with pytest.raises(GatewayUnavailableError):
+            gateway.read_operation(
+                GatewayOperationReference(
+                    operation_id=f"paper:999:{permit.client_order_id}",
+                    client_order_id=permit.client_order_id,
+                )
+            )
+        assert gateway._submission_invocations == 1
+    finally:
+        ledger.close()
+        store.close()
+
+
+def test_terminal_paper_cancellation_observes_committed_result_once(tmp_path: Path) -> None:
+    """A nonterminal request stays silent until Paper commits terminal cancellation truth."""
+    ledger, permit = _leased_permit(tmp_path / "ledger.sqlite")
+    store = PaperStore(tmp_path / "paper.sqlite")
+    observer = _RecordingOperationObserver()
+    gateway = PaperGateway(
+        store,
+        policy=make_policy(),
+        initial_balances={"USDT": "1000", "BTC": "0"},
+        operation_observer=observer,
+    )
+    try:
+        gateway.advance_market(_shallow_observation())
+        SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(permit)
+        gateway.cancel_order(permit.client_order_id)
+        assert observer.results == []
+        terminal = gateway.resolve_cancellation(permit.client_order_id)
+        assert observer.results == [terminal]
+        assert terminal.evidence is not None
+        assert terminal.evidence.state is OrderState.CANCELLED
+        assert gateway._submission_invocations == 1
+    finally:
+        ledger.close()
+        store.close()
+
+
+def test_paper_observer_failure_keeps_committed_terminal_truth(tmp_path: Path) -> None:
+    """A failed post-commit direct observer cannot re-enter the protected submission path."""
+    ledger, permit = _leased_permit(tmp_path / "ledger.sqlite")
+    store = PaperStore(tmp_path / "paper.sqlite")
+    gateway = PaperGateway(
+        store,
+        policy=make_policy(),
+        initial_balances={"USDT": "1000", "BTC": "0"},
+        operation_observer=_RecordingOperationObserver(fail=True),
+    )
+    try:
+        gateway.advance_market(_shallow_observation())
+        SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(permit)
+        gateway.cancel_order(permit.client_order_id)
+        with pytest.raises(RuntimeError, match="injected paper observer failure"):
+            gateway.resolve_cancellation(permit.client_order_id)
+        resolved = gateway.lookup_order_by_client_id(permit.client_order_id)
+        assert resolved is not None and resolved.evidence is not None
+        assert resolved.evidence.state is OrderState.CANCELLED
+        assert gateway._submission_invocations == 1
+    finally:
+        ledger.close()
+        store.close()

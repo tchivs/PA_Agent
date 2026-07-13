@@ -32,6 +32,8 @@ from pa_agent.trading.domain.risk import (
 from pa_agent.trading.ports import ExecutionLedger, OutboundSubmission
 from pa_agent.trading.ports.gateway import (
     GatewayAmbiguityError,
+    GatewayOperationObserver,
+    GatewayOperationResult,
     GatewayUnavailableError,
     TradingGateway,
     TradingGatewayError,
@@ -111,9 +113,9 @@ def test_trading_gateway_annotations_are_canonical_and_venue_neutral() -> None:
             "symbol": str,
             "return": UsdtPerpetualProductEvidence,
         },
-        "submit_order": {"outbound": OutboundSubmission, "return": GatewayEvidence},
-        "cancel_order": {"client_order_id": str, "return": GatewayEvidence},
-        "lookup_order_by_client_id": {"client_order_id": str},
+        "submit_order": {"outbound": OutboundSubmission, "return": GatewayOperationResult},
+        "cancel_order": {"client_order_id": str, "return": GatewayOperationResult},
+        "lookup_order_by_client_id": {"client_order_id": str, "return": GatewayOperationResult | None},
         "list_open_orders": {"account_id": str, "product": ProductType},
         "list_fills": {"command_id": str},
         "reconcile": {"command": ExecutionCommand},
@@ -124,7 +126,7 @@ def test_trading_gateway_annotations_are_canonical_and_venue_neutral() -> None:
         for parameter, expected_type in expected.items():
             assert hints[parameter] == expected_type
 
-    assert get_type_hints(TradingGateway.lookup_order_by_client_id)["return"] == GatewayEvidence | None
+    assert get_type_hints(TradingGateway.lookup_order_by_client_id)["return"] == GatewayOperationResult | None
     assert get_type_hints(TradingGateway.list_open_orders)["return"] == tuple[OrderProjection, ...]
     assert get_type_hints(TradingGateway.list_fills)["return"] == tuple[Fill, ...]
     assert get_type_hints(TradingGateway.reconcile)["return"] == tuple[GatewayEvidence, ...]
@@ -162,12 +164,20 @@ def test_gateway_submission_requires_the_protected_outbound_authorization() -> N
     """An adapter accepts no free-floating command or separately checked claim."""
     assert get_type_hints(TradingGateway.submit_order) == {
         "outbound": OutboundSubmission,
-        "return": GatewayEvidence,
+        "return": GatewayOperationResult,
     }
     gateway_contract = TradingGateway.submit_order.__doc__ or ""
 
     assert "irreversible" in gateway_contract
     assert "ledger-created" in gateway_contract
+
+
+def test_operation_observer_only_accepts_the_immutable_result_contract() -> None:
+    """A generic observer cannot obtain protected outbound capability from its port."""
+    assert get_type_hints(GatewayOperationObserver.observe_operation) == {
+        "result": GatewayOperationResult,
+        "return": type(None),
+    }
 
 
 def test_ticket_consumption_contract_persists_a_permit_not_gateway_authority() -> None:

@@ -11,6 +11,7 @@ import sqlite3
 from types import MappingProxyType
 from typing import Callable, Mapping
 
+from pa_agent.trading.domain.approval import ExecutionTarget
 from pa_agent.trading.domain.models import (
     ExecutionCommand,
     Mode,
@@ -185,6 +186,7 @@ class PaperStore:
         *,
         candidate_factory: Callable[[int], tuple[PaperFillCandidate, ...]] | None = None,
         snapshot_factory: Callable[[int, tuple[PaperFillCandidate, ...]], PaperProductSnapshot] | None = None,
+        margin_evidence_factory: Callable[[int, tuple[PaperFillCandidate, ...]], IsolatedMarginProductEvidence] | None = None,
     ) -> PaperOrder:
         """Atomically persist a new open order and its already-reserved product truth."""
         if (snapshot.account_id, snapshot.product, snapshot.scope) != (
@@ -231,6 +233,10 @@ class PaperStore:
             if snapshot_factory is not None:
                 snapshot = snapshot_factory(sequence, candidates)
             self._persist_snapshot(snapshot, sequence)
+            if margin_evidence_factory is not None:
+                self._persist_isolated_margin_product_evidence(
+                    margin_evidence_factory(sequence, candidates), sequence
+                )
         order = self.fetch_order(command.client_order_id)
         assert order is not None
         return order
@@ -270,6 +276,8 @@ class PaperStore:
         snapshot: PaperProductSnapshot | None = None,
         candidate_factory: Callable[[int], tuple[PaperFillCandidate, ...]] | None = None,
         snapshot_factory: Callable[[int, tuple[PaperFillCandidate, ...]], PaperProductSnapshot] | None = None,
+        margin_evidence_factory: Callable[[int, tuple[PaperFillCandidate, ...]], IsolatedMarginProductEvidence] | None = None,
+        allow_terminal_observation: bool = False,
     ) -> PaperObservationResult:
         """Atomically accept one observation, matching result, and product snapshot."""
         if snapshot is not None:
@@ -305,7 +313,11 @@ class PaperStore:
                 """,
                 scope,
             ).fetchall()
-            if scoped_states and all(row["lifecycle_state"] in _TERMINAL_STATES for row in scoped_states):
+            if (
+                scoped_states
+                and all(row["lifecycle_state"] in _TERMINAL_STATES for row in scoped_states)
+                and not allow_terminal_observation
+            ):
                 return PaperObservationResult(
                     disposition=ObservationDisposition.REJECTED_TERMINAL, paper_event_sequence=None
                 )
@@ -355,6 +367,10 @@ class PaperStore:
                     raise ValueError("paper fill candidate sequence must equal the durable event sequence")
                 self._persist_fill(candidate, sequence)
             self._persist_snapshot(snapshot, sequence)
+            if margin_evidence_factory is not None:
+                self._persist_isolated_margin_product_evidence(
+                    margin_evidence_factory(sequence, candidates), sequence
+                )
         return PaperObservationResult(ObservationDisposition.ACCEPTED, sequence)
 
     def request_cancellation(
@@ -600,6 +616,52 @@ class PaperStore:
         ):
             raise ValueError("stored perpetual evidence is contradictory")
         return evidence
+
+    def _persist_isolated_margin_product_evidence(
+        self, evidence: IsolatedMarginProductEvidence, sequence: int
+    ) -> None:
+        """Write a margin evidence row under an already-open Paper event transaction."""
+        if type(evidence) is not IsolatedMarginProductEvidence or sequence <= 0:
+            raise TypeError("paper margin evidence requires canonical facts and an event sequence")
+        identity = (
+            evidence.target.target_id,
+            evidence.target.account_id,
+            evidence.target.product.value,
+            evidence.isolated_symbol,
+            "isolated_margin_v1",
+        )
+        latest = self._connection.execute(
+            """
+            SELECT observation_version, evidence_digest
+            FROM paper_product_evidence
+            WHERE target_id = ? AND account_id = ? AND product = ? AND scope = ? AND evidence_type = ?
+            ORDER BY observation_version DESC LIMIT 1
+            """,
+            identity,
+        ).fetchone()
+        if latest is not None:
+            if evidence.observation_version < latest["observation_version"]:
+                raise ValueError("paper product evidence is stale")
+            if evidence.observation_version == latest["observation_version"]:
+                if evidence.digest == latest["evidence_digest"]:
+                    return
+                raise ValueError("paper product evidence version conflicts")
+        self._connection.execute(
+            """
+            INSERT INTO paper_product_evidence(
+                target_id, account_id, product, scope, evidence_type, observation_version,
+                observed_at_utc, evidence_digest, payload_json, paper_event_sequence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                *identity,
+                evidence.observation_version,
+                evidence.observed_at.isoformat(),
+                evidence.digest,
+                _canonical_json(_isolated_margin_payload(evidence)),
+                sequence,
+            ),
+        )
 
     def _commit_product_evidence(
         self,

@@ -19,7 +19,9 @@ from pa_agent.trading.domain.approval import TicketRiskResult
 from pa_agent.trading.domain.models import (
     Balance,
     GatewayCapabilities,
+    GatewayEvidence,
     InstrumentRules,
+    OrderState,
     OrderType,
     Position,
     ProductType,
@@ -41,7 +43,12 @@ from pa_agent.trading.persistence.sqlite_connection import (
     open_sqlite_connection,
 )
 from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
-from pa_agent.trading.ports.gateway import GatewayUnavailableError
+from pa_agent.trading.ports.gateway import (
+    GatewayOperationObserver,
+    GatewayOperationReference,
+    GatewayOperationResult,
+    GatewayUnavailableError,
+)
 from pa_agent.trading.ports.ledger import OutboundDispatchPermit, OutboundSubmission
 from tests.fixtures.execution_factories import (
     make_account_observation,
@@ -62,6 +69,19 @@ class _Clock:
 
     def utc_now(self) -> datetime:
         return self.now
+
+
+class _RecordingOperationObserver(GatewayOperationObserver):
+    """Records generic results and optionally proves post-accept failure never resubmits."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.results: list[GatewayOperationResult] = []
+        self._fail = fail
+
+    def observe_operation(self, result: GatewayOperationResult) -> None:
+        self.results.append(result)
+        if self._fail:
+            raise RuntimeError("injected observer failure")
 
 
 class _EvidenceAndSubmissionGateway:
@@ -162,13 +182,24 @@ class _EvidenceAndSubmissionGateway:
             target, symbol, quote_identifier, "USDT", "0.001", "fees-v1", self.observed_at
         )
 
-    def submit_order(self, outbound: OutboundSubmission) -> object:
+    def submit_order(self, outbound: OutboundSubmission) -> GatewayOperationResult:
         if type(outbound) is not OutboundSubmission:
             raise AssertionError("gateway accepts only ledger-produced OutboundSubmission values")
         self.outbound_submissions.append(outbound)
         if self.fail_submit:
             raise RuntimeError("injected gateway outage")
-        return object()
+        return GatewayOperationResult(
+            evidence=GatewayEvidence(
+                evidence_id=f"fake-submit:{outbound.client_order_id}",
+                client_order_id=outbound.client_order_id,
+                state=OrderState.OPEN,
+                observed_at=NOW,
+            ),
+            reference=GatewayOperationReference(
+                operation_id=f"fake-submit:{outbound.client_order_id}",
+                client_order_id=outbound.client_order_id,
+            ),
+        )
 
 
 def _row_counts(database_path: Path) -> dict[str, int]:
@@ -731,5 +762,32 @@ def test_post_lease_gateway_failure_records_ambiguity_without_replacement_dispat
             coordinator.submit(permit)
         assert len(gateway.outbound_submissions) == 1
         assert service._ledger.list_unresolved_reconciliation_jobs()[0].lifecycle_state.value == "submission_unknown"
+    finally:
+        service.close()
+
+
+def test_post_accept_observer_failure_marks_ambiguity_without_second_submit(
+    execution_database_path: Path,
+) -> None:
+    """A persisted permit reaches the gateway once even when its observer fails."""
+    clock = _Clock(NOW)
+    gateway = _EvidenceAndSubmissionGateway()
+    ticket, candidate, policy = _issue_ticket(execution_database_path, clock, gateway)
+    service = _consumer(execution_database_path, clock, gateway)
+    try:
+        permit = service.consume_ticket(ticket.ticket_id, candidate, candidate.target, policy)
+        assert type(permit) is OutboundDispatchPermit
+        observer = _RecordingOperationObserver(fail=True)
+        coordinator = SubmissionCoordinator(
+            ledger=service._ledger,
+            gateway=gateway,
+            operation_observer=observer,
+        )
+        with pytest.raises(RuntimeError, match="injected observer failure"):
+            coordinator.submit(permit)
+        assert len(gateway.outbound_submissions) == 1
+        assert len(observer.results) == 1
+        assert observer.results[0].reference.client_order_id == permit.client_order_id
+        assert service._ledger.list_unresolved_reconciliation_jobs()[0].lifecycle_state is OrderState.SUBMISSION_UNKNOWN
     finally:
         service.close()

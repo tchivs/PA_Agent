@@ -204,7 +204,7 @@ def test_paper_gateway_fails_closed_for_missing_and_cross_scope_product_evidence
             margin.isolated_symbol,
         )
     before_events = store.list_events()
-    with pytest.raises(GatewayUnavailableError):
+    with pytest.raises(TypeError, match="leased OutboundSubmission"):
         gateway.submit_order(object())
     assert store.list_events() == before_events
     store.close()

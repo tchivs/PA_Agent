@@ -26,6 +26,7 @@ from pa_agent.trading.domain.models import (
     IsolatedMarginOrderContext,
     Mode,
     SpotOrderContext,
+    UsdtPerpetualOrderContext,
     TimeObservation,
 )
 from pa_agent.trading.domain.risk import (
@@ -40,6 +41,7 @@ from pa_agent.trading.domain.risk import (
 from pa_agent.trading.domain.paper import MarketObservation, PaperEconomicPolicy, PaperFillCandidate
 from pa_agent.trading.gateways.paper.accounting_spot import PaperSpotAccounting
 from pa_agent.trading.gateways.paper.accounting_margin import PaperMarginAccounting
+from pa_agent.trading.gateways.paper.accounting_perpetual import PaperPerpetualAccounting
 from pa_agent.trading.gateways.paper.faults import FaultPlan
 from pa_agent.trading.gateways.paper.matching import match_order, sort_fill_candidates
 from pa_agent.trading.gateways.paper.store import (
@@ -82,6 +84,7 @@ class PaperGateway(TradingGateway):
         policy: PaperEconomicPolicy | None = None,
         initial_balances: Mapping[str, Decimal | str] | None = None,
         initial_margin_accounts: Mapping[str, PaperMarginAccounting] | None = None,
+        initial_perpetual_accounts: Mapping[str, PaperPerpetualAccounting] | None = None,
         fault_plan: FaultPlan | None = None,
         operation_observer: GatewayOperationObserver | None = None,
     ) -> None:
@@ -113,6 +116,17 @@ class PaperGateway(TradingGateway):
                 self._store.commit_isolated_margin_product_evidence(
                     accounting.to_evidence(target=self._margin_target("paper-account"), observed_at=_PAPER_EPOCH)
                 )
+        if initial_perpetual_accounts is not None:
+            if self._policy is None or self._policy.product is not ProductType.USDT_PERPETUAL:
+                raise TypeError("USDT perpetual accounts require a USDT-perpetual policy")
+            for symbol, accounting in initial_perpetual_accounts.items():
+                if (
+                    type(symbol) is not str
+                    or type(accounting) is not PaperPerpetualAccounting
+                    or symbol != accounting.symbol
+                ):
+                    raise TypeError("paper perpetual account seeds must be exact symbol accounting")
+                self._store.ensure_snapshot(self._perpetual_snapshot("paper-account", accounting))
 
     def get_capabilities(self) -> GatewayCapabilities:
         return GatewayCapabilities(frozenset(ProductType), True, True, True)
@@ -195,7 +209,7 @@ class PaperGateway(TradingGateway):
     ) -> UsdtPerpetualProductEvidence:
         evidence = self._store.load_usdt_perpetual_product_evidence(target, symbol)
         if evidence is None:
-            raise _unavailable("perpetual product evidence")
+            raise _unavailable("USDT-perpetual product evidence")
         return evidence
 
     def submit_order(self, outbound: OutboundSubmission) -> GatewayOperationResult:
@@ -206,6 +220,8 @@ class PaperGateway(TradingGateway):
             return self._submit_spot_order(outbound)
         if type(outbound.command.context) is IsolatedMarginOrderContext:
             return self._submit_margin_order(outbound)
+        if type(outbound.command.context) is UsdtPerpetualOrderContext:
+            return self._submit_perpetual_order(outbound)
         return self._rejected_result(outbound.client_order_id)
 
     def _submit_spot_order(self, outbound: OutboundSubmission) -> GatewayOperationResult:
@@ -289,6 +305,49 @@ class PaperGateway(TradingGateway):
             order = self._store.create_order_with_snapshot(
                 command,
                 self._margin_snapshot(command.account_id, accounting),
+                candidate_factory=candidates_for,
+                snapshot_factory=settled_snapshot,
+            )
+        except ValueError:
+            return self._rejected_result(command.client_order_id)
+        return self._after_accepted_submission(order)
+
+    def _submit_perpetual_order(self, outbound: OutboundSubmission) -> GatewayOperationResult:
+        """Open or reduce only the canonical isolated, one-way symbol position."""
+        command = outbound.command
+        if command.context.product is not ProductType.USDT_PERPETUAL:
+            return self._rejected_result(command.client_order_id)
+        existing = self._store.fetch_order(outbound.client_order_id)
+        if existing is not None:
+            return self._result_for_order(existing)
+        observation = self._store.load_latest_observation(
+            account_id=command.account_id,
+            product=ProductType.USDT_PERPETUAL,
+            symbol=command.context.symbol or command.symbol,
+        )
+        if observation is None:
+            return self._rejected_result(command.client_order_id)
+        accounting = self._load_perpetual_snapshot(command.account_id, command.symbol)
+        policy = self._require_policy()
+        try:
+            accounting.validate_open(command, policy=policy, observation=observation)
+
+            def candidates_for(sequence: int) -> tuple[PaperFillCandidate, ...]:
+                return match_order(
+                    command=command,
+                    observation=observation,
+                    policy=policy,
+                    paper_event_sequence=sequence,
+                ).candidates
+
+            def settled_snapshot(_: int, candidates: tuple[PaperFillCandidate, ...]) -> PaperProductSnapshot:
+                return self._perpetual_snapshot(
+                    command.account_id, accounting.settle(command, candidates, policy=policy)
+                )
+
+            order = self._store.create_order_with_snapshot(
+                command,
+                self._perpetual_snapshot(command.account_id, accounting),
                 candidate_factory=candidates_for,
                 snapshot_factory=settled_snapshot,
             )
@@ -382,7 +441,9 @@ class PaperGateway(TradingGateway):
             return self._advance_spot_market(observation)
         if observation.product is ProductType.ISOLATED_MARGIN:
             return self._advance_margin_market(observation)
-        raise ValueError("PaperGateway has no perpetual accounting projector")
+        if observation.product is ProductType.USDT_PERPETUAL:
+            return self._advance_perpetual_market(observation)
+        raise ValueError("PaperGateway requires a supported product observation")
 
     def _advance_spot_market(self, observation: MarketObservation) -> tuple[GatewayOperationResult, ...]:
         accounting = self._load_spot_snapshot(observation.account_id, observation.symbol)
@@ -514,6 +575,106 @@ class PaperGateway(TradingGateway):
             self._observe_direct(operation_result)
         return results
 
+    def _advance_perpetual_market(self, observation: MarketObservation) -> tuple[GatewayOperationResult, ...]:
+        """Apply explicit mark/funding facts and atomically force-close a maintenance breach."""
+        if self._product() is not ProductType.USDT_PERPETUAL or observation.mark_price is None:
+            raise ValueError("PaperGateway policy requires explicit perpetual mark observations")
+        accounting = self._load_perpetual_snapshot(observation.account_id, observation.symbol)
+        policy = self._require_policy()
+        if accounting.liquidated:
+            self._store.apply_observation(
+                observation=observation,
+                snapshot=self._perpetual_snapshot(observation.account_id, accounting),
+                allow_terminal_observation=True,
+            )
+            return ()
+        if observation.version <= accounting.observation_version:
+            self._store.apply_observation(
+                observation=observation,
+                snapshot=self._perpetual_snapshot(observation.account_id, accounting),
+                allow_terminal_observation=True,
+            )
+            return ()
+        observed = accounting.observe(observation, policy=policy)
+
+        def commands() -> tuple[ExecutionCommand, ...]:
+            return self._store.list_open_commands(
+                account_id=observation.account_id,
+                product=ProductType.USDT_PERPETUAL,
+                symbol=observation.symbol,
+            )
+
+        def projected(candidates: tuple[PaperFillCandidate, ...]) -> PaperPerpetualAccounting:
+            next_accounting = observed
+            by_command: dict[str, list[PaperFillCandidate]] = {}
+            for candidate in candidates:
+                by_command.setdefault(candidate.command_id, []).append(candidate)
+            for command in commands():
+                command_candidates = tuple(by_command.get(command.command_id, ()))
+                if command_candidates:
+                    next_accounting = next_accounting.settle(command, command_candidates, policy=policy)
+            return next_accounting
+
+        liquidation_candidates = []
+        def liquidation(candidates: tuple[PaperFillCandidate, ...]):
+            candidate = projected(candidates).liquidation_candidate(observation, policy=policy)
+            liquidation_candidates[:] = [candidate]
+            return candidate
+
+        def final_accounting(candidates: tuple[PaperFillCandidate, ...]) -> PaperPerpetualAccounting:
+            projected_accounting = projected(candidates)
+            candidate = projected_accounting.liquidation_candidate(observation, policy=policy)
+            return projected_accounting if candidate is None else projected_accounting.liquidate(candidate)
+
+        def candidates_for(sequence: int) -> tuple[PaperFillCandidate, ...]:
+            if observed.liquidation_candidate(observation, policy=policy) is not None:
+                return ()
+            candidates: list[PaperFillCandidate] = []
+            for command in commands():
+                order = self._require_order(command.client_order_id)
+                residual = command.quantity - order.filled_quantity
+                if residual <= 0:
+                    continue
+                matched = match_order(
+                    command=replace(command, quantity=residual),
+                    observation=observation,
+                    policy=policy,
+                    paper_event_sequence=sequence,
+                ).candidates
+                candidates.extend(matched)
+            return sort_fill_candidates(tuple(candidates))
+
+        def perpetual_snapshot(_: int, candidates: tuple[PaperFillCandidate, ...]) -> PaperProductSnapshot:
+            return self._perpetual_snapshot(observation.account_id, final_accounting(candidates))
+
+        def perpetual_evidence(_: int, candidates: tuple[PaperFillCandidate, ...]) -> UsdtPerpetualProductEvidence:
+            return final_accounting(candidates).to_evidence(
+                target=self.perpetual_target(observation.account_id),
+                observed_at=observation.observed_at,
+                mark_price=observation.mark_price,
+                policy=policy,
+            )
+
+        result = self._store.apply_observation(
+            observation=observation,
+            candidate_factory=candidates_for,
+            snapshot_factory=perpetual_snapshot,
+            perpetual_evidence_factory=perpetual_evidence,
+            liquidation_factory=lambda _, candidates: liquidation(candidates),
+            allow_terminal_observation=True,
+        )
+        if result.disposition is not ObservationDisposition.ACCEPTED:
+            return ()
+        candidate = liquidation_candidates[0]
+        if candidate is None:
+            return ()
+        origin = self._store.fetch_order_by_command_id(candidate.origin_command_id)
+        if origin is None:
+            raise _unavailable("perpetual liquidation origin order")
+        operation_result = self._result_for_order(origin)
+        self._observe_direct(operation_result)
+        return (operation_result,)
+
     def _projection(self, order: PaperOrder) -> OrderProjection:
         fills = self.list_fills(order.command_id)
         return OrderProjection(
@@ -621,6 +782,15 @@ class PaperGateway(TradingGateway):
             payload=accounting.to_snapshot_payload(),
         )
 
+    def _perpetual_snapshot(self, account_id: str, accounting: PaperPerpetualAccounting) -> PaperProductSnapshot:
+        return PaperProductSnapshot(
+            account_id=account_id,
+            product=ProductType.USDT_PERPETUAL.value,
+            scope=accounting.symbol,
+            schema_version="paper-usdt-perpetual-snapshot-v1",
+            payload=accounting.to_snapshot_payload(),
+        )
+
     def _load_spot_snapshot(self, account_id: str, symbol: str = "BTCUSDT") -> PaperSpotAccounting:
         snapshot = self._store.load_snapshot(account_id=account_id, product=ProductType.SPOT.value, scope=symbol)
         if snapshot is None:
@@ -640,6 +810,22 @@ class PaperGateway(TradingGateway):
         if snapshot.schema_version != "paper-isolated-margin-snapshot-v1":
             raise ValueError("stored paper margin snapshot schema is unsupported")
         return PaperMarginAccounting.from_snapshot_payload(snapshot.payload)
+
+    def _load_perpetual_snapshot(self, account_id: str, symbol: str) -> PaperPerpetualAccounting:
+        snapshot = self._store.load_snapshot(
+            account_id=account_id,
+            product=ProductType.USDT_PERPETUAL.value,
+            scope=symbol,
+        )
+        if snapshot is None:
+            raise _unavailable("paper USDT perpetual symbol snapshot")
+        if snapshot.schema_version != "paper-usdt-perpetual-snapshot-v1":
+            raise ValueError("stored paper perpetual snapshot schema is unsupported")
+        return PaperPerpetualAccounting.from_snapshot_payload(snapshot.payload)
+
+    def load_perpetual_accounting(self, account_id: str, symbol: str) -> PaperPerpetualAccounting:
+        """Return the independent, durable symbol state without ledger or submission authority."""
+        return self._load_perpetual_snapshot(account_id, symbol)
 
     def _observed_at(self, account_id: str, symbol: str = "BTCUSDT") -> datetime:
         observation = self._store.load_latest_observation(
@@ -679,6 +865,15 @@ class PaperGateway(TradingGateway):
             ProductType.ISOLATED_MARGIN,
         )
 
+    @staticmethod
+    def perpetual_target(account_id: str) -> ExecutionTarget:
+        return ExecutionTarget(
+            "paper-usdt-perpetual-primary",
+            Mode.PAPER,
+            account_id,
+            ProductType.USDT_PERPETUAL,
+        )
+
     def _assert_spot_submission(self, command: ExecutionCommand) -> None:
         if command.context.product is not ProductType.SPOT or type(command.context) is not SpotOrderContext:
             raise ValueError("PaperGateway only accepts Paper Spot submissions")
@@ -694,6 +889,7 @@ class PaperGateway(TradingGateway):
             != {
                 ProductType.SPOT: "paper-spot-primary",
                 ProductType.ISOLATED_MARGIN: "paper-margin-isolated-primary",
+                ProductType.USDT_PERPETUAL: "paper-usdt-perpetual-primary",
             }.get(target.product)
         ):
             raise _unavailable("unsupported paper target")

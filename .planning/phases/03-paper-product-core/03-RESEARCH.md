@@ -268,20 +268,56 @@ class PaperLifecycleMachine(RuleBasedStateMachine):
 |---|-------|---------|---------------|
 | A1 | 在 v1 深度模型中，买单从最低 ask、卖单从最高 bid 顺序消费，LIMIT 仅交叉成交。 | Architecture Patterns | 中；影响重放和预期成交价格，但不改变锁定的显式深度/部分成交语义。 |
 | A2 | cancel 与 observation 在一个 paper-store 递增 event sequence 下串行化。 | Common Pitfalls | 中；若改为其他可线性化机制，race 测试与表设计需要调整。 |
-| A3 | perpetual 清算使用规则版本化的确定性 close price/fee，并以清算 fill 关闭仓位。 | Common Pitfalls | 高；精确公式、资金费/利息/保护性退出政策必须在计划中确定并由用户确认。 |
+| A3 | perpetual 清算使用规则版本化的确定性 close price/fee，并以清算 fill 关闭仓位。 | Common Pitfalls | 中；公式字段由 `PaperEconomicPolicy` 版本化，ProtectiveExitPlan 与 admission authority 已在下方 RESOLVED decision 中固定。 |
 | A4 | 新增应用 projector 统一处理即时提交和恢复得到的 evidence/fill/account snapshot。 | Summary / State of the Art | 中；现有 coordinator/ledger contract 需要最小、受测试保护的扩展。 |
 
-## Open Questions
+## Resolved Questions
 
-1. **永续的“protective exit plan”如何表示？**
-   - What we know: Phase 3 成功标准要求缺少保护性退出计划的永续 entry 被拒绝；当前 `CandidateExecutionIntent`、`UsdtPerpetualOrderContext` 和 ticket binding 没有 stop/reduce-only exit 字段。 [CITED: .planning/ROADMAP.md] [CITED: pa_agent/trading/domain/approval.py] [CITED: pa_agent/trading/domain/models.py]
-   - What's unclear: 退出计划的最小字段、与 source analysis 的绑定，以及允许的 reduce-only 行为。
-   - Recommendation: 在 Wave 0 定义 frozen `ProtectiveExitPlan`，绑定 trigger/limit、reduce-only、最大损失与 policy version；缺失/不匹配时在 candidate/risk 层 reason-code 拒绝。 [ASSUMED]
-2. **margin/perpetual 产品能否复用 Phase 2 分析推荐？**
-   - What we know: `IntentFactory` 目前只允许 Paper Spot，且 `RiskPolicy` 固定为 `phase2-v1` Spot。 [CITED: pa_agent/trading/application/intent_factory.py] [CITED: pa_agent/trading/domain/risk.py]
-   - What's unclear: margin borrow/repay 与 perpetual exit plan 是 operator 输入还是 source-derived typed facts。
-   - Recommendation: 保持 analysis advisory；新增显式、审计绑定的 operator product context，且任何未绑定字段使 ticket 无效。 [ASSUMED]
+### RESOLVED — Canonical ProtectiveExitPlan
 
+`ProtectiveExitPlan` is a frozen Decimal-only domain value owned by `pa_agent/trading/domain/models.py` (Plan 03-03). Its exact fields are: `symbol`, `entry_side`, derived opposite `exit_side`, positive `trigger_price`, optional positive `limit_price`, positive `maximum_loss`, required `reduce_only=True`, `policy_version`, schema version, and a digest of its canonical payload. The candidate/source intent is authoritative for `symbol`, `entry_side`, quantity, and order intent; the product-admission request bound at `IntentFactory.propose()` is authoritative for the plan's price/loss policy values. The plan rejects nonfinite or nonpositive Decimals, wrong symbol/side, a limit price on the unsafe side of its trigger, `reduce_only=False`, unknown/missing payload fields, and noncanonical Decimal text. [CITED: .planning/ROADMAP.md] [CITED: pa_agent/trading/domain/models.py]
+
+Canonical serialization uses a versioned, key-sorted JSON mapping with canonical Decimal strings; deserialization validates the same schema and produces the frozen value. Candidate, ticket binding, policy binding, persisted candidate/ticket/command payload, SQLite lease reconstruction, and recovery all use this one serializer. Any change to an exit field, product context, target, policy version, or digest invalidates the approval and requires a new candidate/assessment/ticket; no caller can amend a plan after candidate creation. Legacy Paper Spot payloads decode only to the canonical Spot context, never to fabricated margin/perpetual values. [CITED: pa_agent/trading/domain/approval.py] [CITED: pa_agent/trading/persistence/sqlite_ledger.py]
+
+### RESOLVED — Product Fact Authority Without Post-analysis Injection
+
+Analysis remains advisory and authoritative only for immutable execution intent: source ID/provenance, symbol, side, order type, quantity, and price intent. The typed product-admission request supplied exactly when a candidate is created is authoritative for selected Paper target, isolated pair/symbol, borrow asset, auto-repay, leverage, isolated/one-way modes, and `ProtectiveExitPlan`; it is frozen into candidate and ticket digests. It cannot be added or replaced after analysis conversion, risk assessment, ticket review, permit creation, lease, or recovery. [CITED: pa_agent/trading/application/intent_factory.py] [CITED: pa_agent/trading/domain/approval.py]
+
+Fresh `EvidenceBundle` members collected by `FreshEvidenceCollector` are the sole authority for mutable facts. For margin they are keyed by `(target_id, account_id, isolated_symbol)` and carry canonical Decimal collateral, available collateral, debt principal, accrued interest, health, borrow availability, repayment status, observation version/time, and digest. For perpetual they are keyed by `(target_id, account_id, symbol)` and carry isolated confirmation, one-way confirmation, maximum leverage, available/initial/maintenance margin, mark, position/exposure, observation version/time, and digest. `RiskEngine` must fail closed on missing, stale, noncanonical, scope-mismatched, or unsafe evidence before a ticket or permit can exist. The current Paper Spot policy remains migration-compatible; only exact Paper isolated-margin and USDT-perpetual target policies are added. [CITED: pa_agent/trading/application/evidence_collector.py] [CITED: pa_agent/trading/application/risk_engine.py] [CITED: pa_agent/trading/domain/risk.py]
+
+### RESOLVED — Paper Projection Authority and Caller Direction
+
+`PaperProjectionBatch` is a frozen read-only application value reconstructed from committed independent PaperGateway/store truth. It contains ascending normalized evidence, only newly unprojected paper fills with exact existing canonical provenance, and account snapshots keyed by account/product/pair-or-symbol and paper event sequence. Its only consumer is `PaperEvidenceProjector`, which receives a narrow central-ledger projection port and has no gateway, permit, lease, command-allocation, or paper-store mutation capability. The only producers are the post-submit coordinator result, explicit `advance_market`, terminal cancellation resolution, and `RecoveryService` durable client-ID lookup; each forwards one batch one way after paper truth commits. [CITED: pa_agent/trading/application/submission.py] [CITED: pa_agent/trading/application/recovery.py] [CITED: pa_agent/trading/ports/gateway.py]
+
+These decisions are implemented in Plans 03-03, 03-10, 03-09, 03-11, and 03-07 before the final hardening corpus. Both prior research questions are RESOLVED; product facts and projection references have explicit typed source ownership.
+
+## Revision Contract Decisions
+
+### Source-grounded product-evidence port
+
+The current `TradingGateway` has `get_account_snapshot(account_id, product)` but no pair or symbol query. `FreshEvidenceCollector` retains only that gateway reference, and `ScriptedEvidenceGateway` has no product-evidence methods. Plan 03-10 therefore owns frozen canonical `IsolatedMarginProductEvidence` and `UsdtPerpetualProductEvidence` values in `domain/risk.py`, two narrow `TradingGateway` reads, compatible scripted fake methods, and a PaperStore/PaperGateway implementation before Plan 03-09 changes collection or admission.
+
+The margin result is keyed by `(target_id, account_id, isolated_symbol)` and carries persisted Decimal collateral, available collateral, debt principal, accrued interest, health, borrow availability, repayment status, observed time, observation version, and digest. The perpetual result is keyed by `(target_id, account_id, symbol)` and carries persisted isolated/one-way confirmations, maximum leverage, available/initial/maintenance margin, mark, position/exposure, observed time, observation version, and digest. Both are frozen reconstructible values from committed independent Paper truth; no collector receives a PaperStore handle, caller map, or cached fallback. This resolves D-06/D-07 fact authority before pre-permit risk admission.
+
+### Exchange-neutral post-operation reference bridge
+
+The current port returns bare `GatewayEvidence` from submit/cancel/lookup; `SubmissionCoordinator.submit()` leases then calls submit once, while `RecoveryService.reconcile_job()` performs only durable client-ID lookup. Plan 03-11 changes these sources deliberately: a frozen generic `GatewayOperationResult` contains normalized `GatewayEvidence | None` plus an opaque durable `GatewayOperationReference`. `TradingGateway.submit_order`, `cancel_order`, and `lookup_order_by_client_id` return the generic result; `SubmissionCoordinator`, recovery, and cancellation callers forward it to a generic post-operation observer without gaining Paper knowledge. The coordinator retains exactly one submit invocation, and observer failure after acceptance remains ambiguous/reconciliation work.
+
+`PaperGateway` implements a separate Paper-only read-reference resolver for the opaque durable identity. That resolver reconstructs the future `PaperProjectionBatch` from committed paper events, fills, and scoped snapshots and has no `OutboundSubmission`, permit, lease, command, or submission method. Plan 03-07 owns the subsequent `PaperProjectionBridge` adapter from the generic observer to this reader and the central projector; it tests submit, explicit advance, terminal cancellation, and recovery together. The bridge can never submit and central projection never becomes Paper truth.
+
+### Final Revision — Three-Product Policy/Ticket Cutover
+
+Before any margin or perpetual flow, Plan 03-13 replaces every fixed-Spot policy and ticket guard in `domain/risk.py`, `domain/approval.py`, `application/approval.py`, and `sqlite_ledger.py`. The catalog has immutable target-bound Paper Spot, isolated-margin, and USDT-perpetual policy identities with stable IDs, versions/digests, and product-only Decimal limits. The selector preserves legacy Phase 2 Spot callers and rows through an explicit compatibility decoder, but new candidate, assessment, ticket, permit, lease, and reconstruction paths validate an exact durable product policy/context pair. Unsupported target/mode/context input denies before authority; no non-Spot path derives the legacy target. [CITED: pa_agent/trading/domain/risk.py] [CITED: pa_agent/trading/domain/approval.py] [CITED: pa_agent/trading/application/approval.py] [CITED: pa_agent/trading/persistence/sqlite_ledger.py]
+
+### Final Revision — Durable Product-Scope Recovery
+
+Plan 03-12 defines immutable nonzero recovery scope from aggregate fixed-Spot assumptions to target/account/product plus exact Spot symbol, isolated-margin pair, or perpetual symbol keys, and `RecoveryAssessmentService` selects policy only from that ledger-provided scope using complete fresh Plan 03-10 typed evidence. Plan 03-14 persists those scope/policy fields, preserves legacy Spot scope decoding, and atomically validates scope, policy, evidence digest, and one-time begin/complete transition state before READY. Forged, missing, cross-pair, cross-symbol, stale, and restarted inputs deny with no ticket, permit, lease, command, client-ID, or submit effect; the Phase 2 zero-scope challenge remains separate. [CITED: pa_agent/trading/application/recovery_assessment.py] [CITED: pa_agent/trading/application/kill_switch.py] [CITED: pa_agent/trading/persistence/sqlite_ledger.py]
+### Final Revision — Automatic Paper Projection Composition
+
+`GatewayOperationObserver.observe_operation(result)` is the one generic post-operation callback with one owner per operation: `SubmissionCoordinator` forwards submit, `PaperGateway` forwards direct `advance_market` and terminal cancellation evidence, and `RecoveryService` forwards lookup. Plan 03-07 makes `PaperProjectionBridge` the observer implementation and `PaperTradingRuntime` in `application/paper_runtime.py` the sole composition owner, injecting one bridge into those three owners; `KillSwitchService` remains request-only. Observer/projection failure leaves durable Paper truth unchanged, never re-submits, and remains retryable through durable lookup. [CITED: pa_agent/trading/ports/gateway.py] [CITED: pa_agent/trading/application/paper_projection.py]
+### Revised ordering
+
+Plan 03-01 is the sole owner of `tests/fixtures/paper_scenarios.py`. Plan 03-02 depends on it and no longer modifies that fixture. The resulting waves are: Wave 1 `03-01`, `03-03`; Wave 2 `03-02`, `03-13`; Wave 3 `03-10`; Wave 4 `03-04`, `03-09`; Wave 5 `03-11`; Wave 6 `03-05`; Wave 7 `03-06`; Wave 8 `03-12`; Wave 9 `03-14`; Wave 10 `03-07`; Wave 11 `03-08`. Product policy/ticket cutover precedes evidence/admission and all margin/perpetual flows; domain recovery scope precedes its durable SQLite enforcement, which precedes final projection/convergence. The three-product kill-switch gate must use individual Spot reservation/open-order, margin pair debt/interest/health/repay, and perpetual symbol position/margin/funding/liquidation clearance facts before READY.
 ## Environment Availability
 
 | Dependency | Required By | Available | Version | Fallback |

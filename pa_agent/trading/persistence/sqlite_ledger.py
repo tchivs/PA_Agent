@@ -63,6 +63,7 @@ from pa_agent.trading.domain.risk import (
     RiskAssessment,
     RiskPolicy,
     select_phase2_policy,
+    select_paper_product_policy,
 )
 from pa_agent.trading.domain.zero_scope_clearance import ZeroScopeClearanceProof
 from pa_agent.trading.persistence.sqlite_connection import (
@@ -219,8 +220,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 INSERT INTO order_commands(
                     command_id, logical_command_key, client_order_id, command_json,
                     mode, product, account_id, symbol, created_at_utc,
-                    product_context_json, product_context_digest
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    product_context_json, product_context_digest,
+                    policy_id, policy_version_bound, policy_digest_bound
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     command.command_id,
@@ -234,6 +236,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     now,
                     product_context_to_canonical_payload(command.context),
                     product_context_digest(command.context),
+                    policy.policy_id,
+                    policy.policy_version,
+                    policy.policy_digest,
                 ),
             )
             self._append_event(
@@ -272,8 +277,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 """
                 INSERT INTO outbound_dispatch_attempts(
                     command_id, client_order_id, reconciliation_job_id, outbound_attempt_proof,
-                    created_at_utc, expires_at_utc, status, leased_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                    created_at_utc, expires_at_utc, status, leased_at_utc,
+                    policy_id, policy_version_bound, policy_digest_bound
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
                 """,
                 (
                     command.command_id,
@@ -283,6 +289,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     now,
                     _timestamp_text(ticket.expires_at),
                     "pending",
+                    policy.policy_id,
+                    policy.policy_version,
+                    policy.policy_digest,
                 ),
             )
             self._inject_failure("before_ticket_consumption")
@@ -305,7 +314,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 """
                 SELECT commands.command_json, commands.client_order_id, jobs.job_id,
                        orders.lifecycle_state, claims.status, attempts.expires_at_utc, attempts.status,
-                       commands.product_context_json, commands.product_context_digest
+                       commands.product_context_json, commands.product_context_digest,
+                       commands.policy_id, commands.policy_version_bound, commands.policy_digest_bound,
+                       attempts.policy_id, attempts.policy_version_bound, attempts.policy_digest_bound
                 FROM outbound_dispatch_attempts AS attempts
                 JOIN order_commands AS commands ON commands.command_id = attempts.command_id
                 JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
@@ -348,6 +359,17 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 raise LedgerStorageError("dispatch proof has expired")
             if row[3] != OrderState.SUBMITTING.value or row[4] != "outbound_started":
                 raise LedgerStorageError("dispatch proof is not backed by durable outbound state")
+            command = _command_from_canonical_json(row[0])
+            if command.command_id != permit.command_id or command.client_order_id != row[1]:
+                raise LedgerStorageError("durable command identity does not match dispatch proof")
+            if row[7] is not None and (
+                product_context_to_canonical_payload(command.context) != row[7]
+                or product_context_digest(command.context) != row[8]
+            ):
+                raise LedgerStorageError("durable command context does not match its persisted binding")
+            _validate_durable_command_policy(command, row[9], row[10], row[11])
+            if row[9:12] != row[12:15]:
+                raise LedgerStorageError("dispatch policy does not match durable command binding")
             leased = connection.execute(
                 """
                 UPDATE outbound_dispatch_attempts SET status = ?, leased_at_utc = ?
@@ -367,14 +389,6 @@ class SQLiteExecutionLedger(ExecutionLedger):
             )
             if leased.rowcount != 1:
                 raise LedgerStorageError("dispatch proof could not be leased")
-            command = _command_from_canonical_json(row[0])
-            if command.command_id != permit.command_id or command.client_order_id != row[1]:
-                raise LedgerStorageError("durable command identity does not match dispatch proof")
-            if row[7] is not None and (
-                product_context_to_canonical_payload(command.context) != row[7]
-                or product_context_digest(command.context) != row[8]
-            ):
-                raise LedgerStorageError("durable command context does not match its persisted binding")
             return OutboundSubmission(
                 command=command,
                 command_id=permit.command_id,
@@ -804,6 +818,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
         with transaction(connection):
             if assessment.accepted:
                 self._require_ready_in_transaction()
+            policy = _policy_for_assessment(candidate, assessment) if assessment.accepted else None
             snapshot_digest = self._candidate_snapshot_digest(candidate)
             now = _timestamp_text(self.utc_now())
             fee_amount = (
@@ -818,8 +833,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 INSERT INTO proposal_risk_assessments(
                     assessment_id, intent_digest, accepted, policy_version, policy_digest,
                     evidence_digest, reason_codes_json, fee_amount, assessment_json,
-                    observed_at_utc, recorded_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    observed_at_utc, recorded_at_utc,
+                    policy_id, policy_version_bound, policy_digest_bound
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     assessment_id,
@@ -833,8 +849,20 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     self._safe_canonical_json(canonicalize(assessment)),
                     now,
                     now,
+                    policy.policy_id if policy is not None else None,
+                    policy.policy_version if policy is not None else None,
+                    policy.policy_digest if policy is not None else None,
                 ),
             )
+            if policy is not None:
+                connection.execute(
+                    """
+                    UPDATE proposal_candidates
+                    SET policy_id = ?, policy_version_bound = ?, policy_digest_bound = ?
+                    WHERE intent_digest = ?
+                    """,
+                    (policy.policy_id, policy.policy_version, policy.policy_digest, candidate.intent_digest),
+                )
             self._append_proposal_audit_fact(
                 kind="risk_assessed" if assessment.accepted else "risk_rejected",
                 source_id=candidate.source_id,
@@ -954,8 +982,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                         ticket_id, intent_digest, policy_digest, evidence_digest, policy_version,
                         binding_json, status, created_at_utc, expires_at_utc,
                         terminal_event, terminal_reason, terminal_at_utc,
-                        product_context_json, product_context_digest
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                        product_context_json, product_context_digest,
+                        policy_id, policy_version_bound, policy_digest_bound
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticket.ticket_id,
@@ -969,6 +998,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                         _timestamp_text(ticket.expires_at),
                         binding.product_context_payload,
                         binding.product_context_digest,
+                        binding.policy_id,
+                        binding.policy_version,
+                        binding.policy_digest,
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -1521,11 +1553,13 @@ class SQLiteExecutionLedger(ExecutionLedger):
         """Append one immutable ticket event inside the active transaction."""
         if occurred_at is None:
             raise LedgerStorageError("ticket event timestamp is required")
+        event_binding = binding or ticket.binding
         self._require_connection().execute(
             """
             INSERT INTO approval_ticket_events(
-                event_id, ticket_id, event_type, reason, actor_label, binding_json, occurred_at_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                event_id, ticket_id, event_type, reason, actor_label, binding_json, occurred_at_utc,
+                policy_id, policy_version_bound, policy_digest_bound
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _new_id("approval-ticket-event"),
@@ -1533,8 +1567,11 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 event_type,
                 reason,
                 actor_label,
-                _canonical_json(canonicalize(binding or ticket.binding)),
+                _canonical_json(canonicalize(event_binding)),
                 _timestamp_text(occurred_at),
+                event_binding.policy_id,
+                event_binding.policy_version,
+                event_binding.policy_digest,
             ),
         )
 
@@ -2217,6 +2254,76 @@ def _is_recovery_timestamp_fresh(observed_at: datetime, now: datetime) -> bool:
     return 0 <= age_seconds <= 60
 
 
+def _validate_durable_command_policy(
+    command: ExecutionCommand, policy_id: object, policy_version: object, policy_digest: object
+) -> None:
+    """Validate durable command policy/context facts before issuing a lease."""
+    if policy_id is None and policy_version is None and policy_digest is None:
+        if type(command.context) is not SpotOrderContext:
+            raise LedgerStorageError("legacy policy decoding is restricted to Spot commands")
+        return
+    if not all(isinstance(value, str) and value for value in (policy_id, policy_version, policy_digest)):
+        raise LedgerStorageError("durable command policy identity is incomplete")
+    target = ExecutionTarget(
+        "paper-spot-primary" if policy_version == "phase2-v1" else policy_id,
+        command.mode,
+        command.account_id,
+        command.context.product,
+    )
+    try:
+        policy = (
+            select_phase2_policy(target)
+            if policy_version == "phase2-v1"
+            else select_paper_product_policy(target, command.context)
+        )
+    except Exception as exc:
+        raise LedgerStorageError("durable command policy/context is unsupported") from exc
+    if (
+        policy.policy_id != policy_id
+        or policy.policy_version != policy_version
+        or policy.policy_digest != policy_digest
+    ):
+        raise LedgerStorageError("durable command policy/context identity mismatch")
+
+
+def _policy_for_assessment(
+    candidate: CandidateExecutionIntent, assessment: RiskAssessment
+) -> RiskPolicy:
+    """Resolve the sole durable policy allowed by an accepted assessment."""
+    policy = (
+        select_phase2_policy(candidate.target)
+        if assessment.policy_version == "phase2-v1"
+        else select_paper_product_policy(candidate.target, candidate.context)
+    )
+    if policy.policy_version != assessment.policy_version or policy.policy_digest != assessment.policy_digest:
+        raise ValueError("stored assessment policy does not match durable candidate context")
+    return policy
+
+
+def _validate_ticket_binding_policy(binding: TicketBinding) -> None:
+    """Reject policy/context substitutions while reconstructing a durable ticket."""
+    context = product_context_from_canonical_payload(binding.product_context_payload)
+    if product_context_digest(context) != binding.product_context_digest:
+        raise ValueError("ticket context digest does not match durable payload")
+    target = ExecutionTarget(
+        binding.venue,
+        Mode(binding.environment),
+        binding.account_id,
+        ProductType(binding.product),
+    )
+    policy = (
+        select_phase2_policy(target)
+        if binding.policy_version == "phase2-v1"
+        else select_paper_product_policy(target, context)
+    )
+    if (
+        policy.policy_id != binding.policy_id
+        or policy.policy_version != binding.policy_version
+        or policy.policy_digest != binding.policy_digest
+    ):
+        raise ValueError("ticket policy does not match durable context")
+
+
 def _ticket_binding_from_persisted_json(
     *, candidate: CandidateExecutionIntent, evidence_json: str, assessment: RiskAssessment
 ) -> TicketBinding:
@@ -2227,9 +2334,7 @@ def _ticket_binding_from_persisted_json(
         fee = assessment.fee_estimate
         if fee is None:
             raise ValueError("accepted assessment has no fee estimate")
-        policy = select_phase2_policy(candidate.target)
-        if policy.policy_digest != assessment.policy_digest or policy.policy_version != assessment.policy_version:
-            raise ValueError("stored assessment policy does not match the fixed target policy")
+        policy = _policy_for_assessment(candidate, assessment)
         return TicketBinding.from_persisted_facts(
             candidate=candidate,
             policy=policy,
@@ -2255,6 +2360,7 @@ def _ticket_from_row(row: tuple[object, ...]) -> ApprovalTicket:
             source_digest=binding_data["source_digest"],
             command_digest=binding_data["command_digest"],
             target_digest=binding_data["target_digest"],
+            policy_id=binding_data.get("policy_id", "phase2-paper-spot-legacy"),
             policy_version=binding_data["policy_version"],
             policy_digest=binding_data["policy_digest"],
             evidence_digest=binding_data["evidence_digest"],
@@ -2292,6 +2398,7 @@ def _ticket_from_row(row: tuple[object, ...]) -> ApprovalTicket:
                 metrics=tuple((name, Decimal(value)) for name, value in risk_data["metrics"]),
             ),
         )
+        _validate_ticket_binding_policy(binding)
         return ApprovalTicket(
             ticket_id=str(row[0]),
             binding=binding,

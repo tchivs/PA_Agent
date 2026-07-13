@@ -357,6 +357,7 @@ class TicketBinding:
     source_digest: str
     command_digest: str
     target_digest: str
+    policy_id: str
     policy_version: str
     policy_digest: str
     evidence_digest: str
@@ -403,8 +404,9 @@ class TicketBinding:
 
         if type(candidate) is not CandidateExecutionIntent:
             raise TypeError("ticket binding requires a canonical persisted candidate")
-        if type(policy) is not RiskPolicy or policy.policy_version != "phase2-v1":
-            raise ValueError("ticket binding requires the fixed phase2-v1 policy")
+        if type(policy) is not RiskPolicy:
+            raise ValueError("ticket binding requires an immutable Paper policy")
+        policy.require_matches(candidate, candidate.target)
         if type(fee_estimate) is not FeeEstimate or fee_estimate.target != candidate.target:
             raise ValueError("ticket binding requires target-bound Decimal fee evidence")
         if not evidence_digest:
@@ -436,6 +438,7 @@ class TicketBinding:
             source_digest=source_digest,
             command_digest=candidate.intent_digest,
             target_digest=_canonical_digest(candidate.target),
+            policy_id=policy.policy_id,
             product_context_payload=product_context_to_canonical_payload(candidate.context),
             product_context_digest=product_context_digest(candidate.context),
             policy_version=policy.policy_version,
@@ -479,8 +482,9 @@ class TicketBinding:
         if now.tzinfo is None or now.utcoffset() is None:
             return False
         if (
-            policy.policy_version != "phase2-v1"
+            policy.policy_id != self.policy_id
             or policy.policy_digest != self.policy_digest
+            or current.policy_id != policy.policy_id
             or current.policy_version != policy.policy_version
             or current.policy_digest != policy.policy_digest
         ):
@@ -544,11 +548,11 @@ class ApprovalTicket:
 
     @classmethod
     def create(cls, *, ticket_id: str, binding: TicketBinding, created_at: datetime) -> ApprovalTicket:
-        """Issue exactly one fixed-policy, 60-second pending review ticket."""
+        """Issue one 60-second pending review ticket bound to an immutable policy."""
         from datetime import timedelta
 
-        if not ticket_id or binding.policy_version != "phase2-v1":
-            raise ValueError("pending tickets require an identity and fixed phase2-v1 policy")
+        if not ticket_id or not binding.policy_id or not binding.policy_version or not binding.policy_digest:
+            raise ValueError("pending tickets require an immutable policy identity")
         if created_at.tzinfo is None or created_at.utcoffset() is None:
             raise ValueError("ticket creation time must be timezone-aware")
         return cls(

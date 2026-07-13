@@ -45,8 +45,8 @@ class ApprovalService:
         """Idempotently create the one pending ticket after persisted acceptance."""
         if not assessment.accepted:
             raise ValueError("only an accepted persisted risk assessment can issue a ticket")
-        if assessment.policy_version != "phase2-v1":
-            raise ValueError("pending tickets require the fixed phase2-v1 policy")
+        if not assessment.policy_version or not assessment.policy_digest:
+            raise ValueError("accepted risk assessment requires an immutable policy identity")
         return self._ledger.create_pending_ticket_if_absent(candidate, assessment, self._utc_now())
 
     def reject_ticket(self, ticket_id: str, reason: str) -> ApprovalTicket:

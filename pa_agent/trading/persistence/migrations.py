@@ -424,6 +424,21 @@ def _add_product_context_contract_columns(connection: sqlite3.Connection) -> Non
         connection.execute(f"ALTER TABLE {table} ADD COLUMN product_context_digest TEXT")
 
 
+def _add_product_policy_binding_columns(connection: sqlite3.Connection) -> None:
+    """Append durable policy identities without changing historical Phase 2 rows."""
+    for table in (
+        "proposal_candidates",
+        "proposal_risk_assessments",
+        "approval_tickets",
+        "approval_ticket_events",
+        "order_commands",
+        "outbound_dispatch_attempts",
+    ):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN policy_id TEXT")
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN policy_version_bound TEXT")
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN policy_digest_bound TEXT")
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
@@ -434,4 +449,5 @@ MIGRATIONS = (
     Migration(7, _add_zero_scope_clearance_audit_columns),
     Migration(8, _create_zero_scope_recovery_transition_schema),
     Migration(9, _add_product_context_contract_columns),
+    Migration(10, _add_product_policy_binding_columns),
 )

@@ -84,4 +84,4 @@ def test_migration_is_idempotent_for_existing_spot_rows(execution_database_path:
     finally:
         second.close()
 
-    assert versions[-1] == (9,)
+    assert versions[-1] == (10,)

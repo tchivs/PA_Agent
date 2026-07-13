@@ -22,6 +22,7 @@ from pa_agent.trading.domain.models import (
     OrderState,
     OrderType,
     Position,
+    ProtectiveExitPlan,
     ProductType,
     QuoteObservation,
     RuleObservation,
@@ -30,6 +31,10 @@ from pa_agent.trading.domain.models import (
     TimeObservation,
     UsdtPerpetualOrderContext,
     decimal_from_canonical,
+    product_context_digest,
+    product_context_from_canonical_payload,
+    product_context_to_canonical_dict,
+    product_context_to_canonical_payload,
     decimal_to_canonical,
 )
 
@@ -50,6 +55,7 @@ __all__ = [
     "OrderState",
     "OrderType",
     "Position",
+    "ProtectiveExitPlan",
     "ProductContextError",
     "ProductType",
     "QuoteObservation",
@@ -62,4 +68,8 @@ __all__ = [
     "UsdtPerpetualOrderContext",
     "decimal_from_canonical",
     "decimal_to_canonical",
+    "product_context_digest",
+    "product_context_from_canonical_payload",
+    "product_context_to_canonical_dict",
+    "product_context_to_canonical_payload",
 ]

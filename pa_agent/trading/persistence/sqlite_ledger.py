@@ -53,6 +53,9 @@ from pa_agent.trading.domain.models import (
     UsdtPerpetualOrderContext,
     canonicalize,
     decimal_to_canonical,
+    product_context_digest,
+    product_context_from_canonical_payload,
+    product_context_to_canonical_payload,
 )
 from pa_agent.trading.domain.recovery_evidence import RecoveryEvidence
 from pa_agent.trading.domain.risk import (
@@ -204,7 +207,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 order_type=candidate.order_type,
                 quantity=candidate.quantity,
                 price=candidate.price,
-                context=SpotOrderContext(),
+                context=candidate.context,
             )
             now = _timestamp_text(self.utc_now())
             submitting = assert_transition(OrderState.PROPOSED, LifecycleEvent.SUBMIT_REQUESTED)
@@ -215,8 +218,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 """
                 INSERT INTO order_commands(
                     command_id, logical_command_key, client_order_id, command_json,
-                    mode, product, account_id, symbol, created_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mode, product, account_id, symbol, created_at_utc,
+                    product_context_json, product_context_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     command.command_id,
@@ -228,6 +232,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     command.account_id,
                     command.symbol,
                     now,
+                    product_context_to_canonical_payload(command.context),
+                    product_context_digest(command.context),
                 ),
             )
             self._append_event(
@@ -298,7 +304,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
             row = connection.execute(
                 """
                 SELECT commands.command_json, commands.client_order_id, jobs.job_id,
-                       orders.lifecycle_state, claims.status, attempts.expires_at_utc, attempts.status
+                       orders.lifecycle_state, claims.status, attempts.expires_at_utc, attempts.status,
+                       commands.product_context_json, commands.product_context_digest
                 FROM outbound_dispatch_attempts AS attempts
                 JOIN order_commands AS commands ON commands.command_id = attempts.command_id
                 JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
@@ -363,6 +370,11 @@ class SQLiteExecutionLedger(ExecutionLedger):
             command = _command_from_canonical_json(row[0])
             if command.command_id != permit.command_id or command.client_order_id != row[1]:
                 raise LedgerStorageError("durable command identity does not match dispatch proof")
+            if row[7] is not None and (
+                product_context_to_canonical_payload(command.context) != row[7]
+                or product_context_digest(command.context) != row[8]
+            ):
+                raise LedgerStorageError("durable command context does not match its persisted binding")
             return OutboundSubmission(
                 command=command,
                 command_id=permit.command_id,
@@ -697,14 +709,23 @@ class SQLiteExecutionLedger(ExecutionLedger):
         with transaction(connection):
             snapshot_digest = self._record_candidate_source(candidate)
             now = _timestamp_text(self.utc_now())
-            candidate_json = self._safe_canonical_json(canonicalize(candidate))
+            candidate_json = self._safe_canonical_json(_candidate_canonical_data(candidate))
+            context_payload = product_context_to_canonical_payload(candidate.context)
             connection.execute(
                 """
                 INSERT OR IGNORE INTO proposal_candidates(
-                    intent_digest, snapshot_digest, candidate_json, recorded_at_utc
-                ) VALUES (?, ?, ?, ?)
+                    intent_digest, snapshot_digest, candidate_json, recorded_at_utc,
+                    product_context_json, product_context_digest
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (candidate.intent_digest, snapshot_digest, candidate_json, now),
+                (
+                    candidate.intent_digest,
+                    snapshot_digest,
+                    candidate_json,
+                    now,
+                    context_payload,
+                    product_context_digest(candidate.context),
+                ),
             )
             self._append_proposal_audit_fact(
                 kind="candidate_accepted",
@@ -887,7 +908,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
             if existing is not None:
                 return existing
             candidate_row = connection.execute(
-                "SELECT candidate_json FROM proposal_candidates WHERE intent_digest = ?",
+                "SELECT candidate_json, product_context_json, product_context_digest "
+                "FROM proposal_candidates WHERE intent_digest = ?",
                 (candidate.intent_digest,),
             ).fetchone()
             evidence_row = connection.execute(
@@ -910,8 +932,13 @@ class SQLiteExecutionLedger(ExecutionLedger):
             ).fetchone()
             if candidate_row is None or evidence_row is None or assessment_row is None:
                 raise LedgerStorageError("ticket issuance requires persisted candidate, evidence, and acceptance")
-            if candidate_row[0] != self._safe_canonical_json(canonicalize(candidate)):
+            if candidate_row[0] != self._safe_canonical_json(_candidate_canonical_data(candidate)):
                 raise LedgerStorageError("ticket candidate does not match durable proposal facts")
+            if candidate_row[1] is not None and (
+                candidate_row[1] != product_context_to_canonical_payload(candidate.context)
+                or candidate_row[2] != product_context_digest(candidate.context)
+            ):
+                raise LedgerStorageError("ticket context does not match durable proposal facts")
             if json.loads(assessment_row[0]) != canonicalize(assessment):
                 raise LedgerStorageError("ticket assessment does not match durable proposal facts")
             binding = _ticket_binding_from_persisted_json(
@@ -926,8 +953,9 @@ class SQLiteExecutionLedger(ExecutionLedger):
                     INSERT INTO approval_tickets(
                         ticket_id, intent_digest, policy_digest, evidence_digest, policy_version,
                         binding_json, status, created_at_utc, expires_at_utc,
-                        terminal_event, terminal_reason, terminal_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                        terminal_event, terminal_reason, terminal_at_utc,
+                        product_context_json, product_context_digest
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
                     """,
                     (
                         ticket.ticket_id,
@@ -939,6 +967,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
                         ticket.status.value,
                         _timestamp_text(ticket.created_at),
                         _timestamp_text(ticket.expires_at),
+                        binding.product_context_payload,
+                        binding.product_context_digest,
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -2096,21 +2126,14 @@ def _command_from_canonical_json(command_json: str) -> ExecutionCommand:
     try:
         data = json.loads(command_json)
         context_data = data["context"]
-        product = ProductType(context_data["product"])
-        if product is ProductType.SPOT:
+        if type(context_data) is not dict:
+            raise ValueError("command context must be an object")
+        if "schema_version" not in context_data:
+            if ProductType(context_data["product"]) is not ProductType.SPOT:
+                raise ValueError("only legacy Spot contexts are supported")
             context = SpotOrderContext()
-        elif product is ProductType.ISOLATED_MARGIN:
-            context = IsolatedMarginOrderContext(
-                isolated_symbol=context_data["isolated_symbol"],
-                borrow_asset=context_data.get("borrow_asset"),
-                auto_repay=context_data.get("auto_repay", False),
-            )
         else:
-            context = UsdtPerpetualOrderContext(
-                leverage=context_data["leverage"],
-                margin_mode=context_data["margin_mode"],
-                position_mode=context_data["position_mode"],
-            )
+            context = product_context_from_canonical_payload(_canonical_json(context_data))
         return ExecutionCommand(
             command_id=data["command_id"],
             logical_command_key=data["logical_command_key"],
@@ -2169,6 +2192,13 @@ def _timestamp_text(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("ledger timestamps must be timezone-aware")
     return value.astimezone(UTC).isoformat()
+
+
+def _candidate_canonical_data(candidate: CandidateExecutionIntent) -> dict[str, Any]:
+    """Store the candidate with the same strict context payload used by command binding."""
+    data = canonicalize(candidate)
+    data["context"] = json.loads(product_context_to_canonical_payload(candidate.context))
+    return data
 
 
 def _timestamp_from_text(value: str) -> datetime:
@@ -2234,6 +2264,12 @@ def _ticket_from_row(row: tuple[object, ...]) -> ApprovalTicket:
             data_age_digest=binding_data["data_age_digest"],
             observation_timestamps=tuple(
                 _timestamp_from_text(value) for value in binding_data["observation_timestamps"]
+            ),
+            product_context_payload=binding_data.get(
+                "product_context_payload", product_context_to_canonical_payload(SpotOrderContext())
+            ),
+            product_context_digest=binding_data.get(
+                "product_context_digest", product_context_digest(SpotOrderContext())
             ),
             venue=binding_data["venue"],
             environment=binding_data["environment"],

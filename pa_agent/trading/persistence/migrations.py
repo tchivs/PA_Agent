@@ -417,6 +417,13 @@ _ZERO_SCOPE_RECOVERY_TRANSITION_SCHEMA_STATEMENTS = (
 )
 
 
+def _add_product_context_contract_columns(connection: sqlite3.Connection) -> None:
+    """Append nullable context material without rewriting Phase 2 Spot history."""
+    for table in ("proposal_candidates", "approval_tickets", "order_commands"):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN product_context_json TEXT")
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN product_context_digest TEXT")
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
@@ -426,4 +433,5 @@ MIGRATIONS = (
     Migration(6, _create_recovery_assessment_schema),
     Migration(7, _add_zero_scope_clearance_audit_columns),
     Migration(8, _create_zero_scope_recovery_transition_schema),
+    Migration(9, _add_product_context_contract_columns),
 )

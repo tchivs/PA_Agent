@@ -12,10 +12,14 @@ from pa_agent.trading.domain.errors import ConversionRejection, ConversionReject
 from pa_agent.trading.domain.models import (
     Mode,
     OrderType,
+    ProductContext,
     ProductType,
     Side,
+    SpotOrderContext,
     canonicalize,
     decimal_from_canonical,
+    product_context_digest,
+    product_context_to_canonical_payload,
 )
 
 
@@ -159,6 +163,7 @@ class CandidateExecutionIntent:
     quantity: Decimal
     price: Decimal | None
     risk_basis: Decimal
+    context: ProductContext = field(default_factory=SpotOrderContext)
     auto_ticket_eligible: bool = True
     intent_digest: str = field(init=False)
 
@@ -170,6 +175,12 @@ class CandidateExecutionIntent:
         elif self.order_type is OrderType.MARKET:
             if self.price is not None:
                 raise ConversionRejection(ConversionRejectionReason.SEMANTIC_CONFLICT)
+        try:
+            product_context_to_canonical_payload(self.context)
+        except Exception as exc:
+            raise ConversionRejection(ConversionRejectionReason.UNSUPPORTED_TARGET) from exc
+        if self.target.product is not self.context.product:
+            raise ConversionRejection(ConversionRejectionReason.UNSUPPORTED_TARGET)
         object.__setattr__(self, "intent_digest", _canonical_digest(self._hash_material()))
 
     def _hash_material(self) -> dict[str, object]:
@@ -186,6 +197,8 @@ class CandidateExecutionIntent:
             "quantity": self.quantity,
             "price": self.price,
             "risk_basis": self.risk_basis,
+            "product_context_payload": product_context_to_canonical_payload(self.context),
+            "product_context_digest": product_context_digest(self.context),
         }
 
 
@@ -352,6 +365,8 @@ class TicketBinding:
     authorization_evidence_digest: str
     data_age_digest: str
     observation_timestamps: tuple[datetime, ...]
+    product_context_payload: str
+    product_context_digest: str
     venue: str
     environment: str
     account_id: str
@@ -421,6 +436,8 @@ class TicketBinding:
             source_digest=source_digest,
             command_digest=candidate.intent_digest,
             target_digest=_canonical_digest(candidate.target),
+            product_context_payload=product_context_to_canonical_payload(candidate.context),
+            product_context_digest=product_context_digest(candidate.context),
             policy_version=policy.policy_version,
             policy_digest=policy.policy_digest,
             evidence_digest=evidence_digest,

@@ -9,11 +9,19 @@ import json
 from pathlib import Path
 import sqlite3
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
-from pa_agent.trading.domain.approval import ExecutionTarget
-from pa_agent.trading.domain.models import ExecutionCommand, decimal_from_canonical, decimal_to_canonical
-from pa_agent.trading.domain.paper import MarketObservation, PaperFillCandidate
+from pa_agent.trading.domain.models import (
+    ExecutionCommand,
+    Mode,
+    OrderType,
+    ProductType,
+    Side,
+    decimal_from_canonical,
+    decimal_to_canonical,
+    product_context_from_canonical_payload,
+)
+from pa_agent.trading.domain.paper import DepthLevel, MarketObservation, PaperFillCandidate
 from pa_agent.trading.domain.risk import (
     IsolatedMarginProductEvidence,
     UsdtPerpetualProductEvidence,
@@ -152,15 +160,120 @@ class PaperStore:
         assert order is not None
         return order
 
+    def ensure_snapshot(self, snapshot: PaperProductSnapshot) -> PaperProductSnapshot:
+        """Initialize one paper account scope once without consulting any central projection."""
+        with transaction(self._connection):
+            existing = self.load_snapshot(
+                account_id=snapshot.account_id, product=snapshot.product, scope=snapshot.scope
+            )
+            if existing is not None:
+                return existing
+            sequence = self._allocate_sequence()
+            self._append_event(
+                sequence=sequence,
+                event_type="account_initialized",
+                client_order_id=None,
+                command_id=None,
+                payload_json=_canonical_json(dict(snapshot.payload)),
+            )
+            return self._persist_snapshot(snapshot, sequence)
+
+    def create_order_with_snapshot(
+        self,
+        command: ExecutionCommand,
+        snapshot: PaperProductSnapshot,
+        *,
+        candidate_factory: Callable[[int], tuple[PaperFillCandidate, ...]] | None = None,
+        snapshot_factory: Callable[[int, tuple[PaperFillCandidate, ...]], PaperProductSnapshot] | None = None,
+    ) -> PaperOrder:
+        """Atomically persist a new open order and its already-reserved product truth."""
+        if (snapshot.account_id, snapshot.product, snapshot.scope) != (
+            command.account_id,
+            command.context.product.value,
+            command.symbol,
+        ):
+            raise ValueError("paper order snapshot scope must match command")
+        command_json = _canonical_json(command.to_canonical_dict())
+        with transaction(self._connection):
+            sequence = self._allocate_sequence()
+            self._connection.execute(
+                """
+                INSERT INTO paper_orders(
+                    client_order_id, command_id, account_id, product, symbol, command_json,
+                    quantity, lifecycle_state, filled_quantity, paper_event_sequence, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', '0', ?, ?)
+                """,
+                (
+                    command.client_order_id,
+                    command.command_id,
+                    command.account_id,
+                    command.context.product.value,
+                    command.symbol,
+                    command_json,
+                    decimal_to_canonical(command.quantity),
+                    sequence,
+                    _utc_now_text(),
+                ),
+            )
+            self._append_event(
+                sequence=sequence,
+                event_type="order_opened",
+                client_order_id=command.client_order_id,
+                command_id=command.command_id,
+                payload_json=command_json,
+            )
+            candidates = () if candidate_factory is None else candidate_factory(sequence)
+            self._assert_candidates_mutable(candidates)
+            for candidate in candidates:
+                if candidate.paper_event_sequence != sequence:
+                    raise ValueError("paper fill candidate sequence must equal the durable event sequence")
+                self._persist_fill(candidate, sequence)
+            if snapshot_factory is not None:
+                snapshot = snapshot_factory(sequence, candidates)
+            self._persist_snapshot(snapshot, sequence)
+        order = self.fetch_order(command.client_order_id)
+        assert order is not None
+        return order
+
+    def list_open_commands(self, *, account_id: str, product: ProductType, symbol: str) -> tuple[ExecutionCommand, ...]:
+        """Reconstruct open commands from paper-owned durable payloads for explicit matching only."""
+        rows = self._connection.execute(
+            """
+            SELECT command_json FROM paper_orders
+            WHERE account_id = ? AND product = ? AND symbol = ?
+              AND lifecycle_state NOT IN ('FILLED', 'CANCELLED', 'REJECTED')
+            ORDER BY client_order_id
+            """,
+            (account_id, product.value, symbol),
+        ).fetchall()
+        return tuple(_command_from_canonical_json(row["command_json"]) for row in rows)
+
+    def load_latest_observation(
+        self, *, account_id: str, product: ProductType, symbol: str
+    ) -> MarketObservation | None:
+        """Return the latest accepted explicit book; there is no local-time market fallback."""
+        row = self._connection.execute(
+            """
+            SELECT payload_json FROM paper_market_books
+            WHERE account_id = ? AND product = ? AND symbol = ?
+            ORDER BY observation_version DESC LIMIT 1
+            """,
+            (account_id, product.value, symbol),
+        ).fetchone()
+        return None if row is None else _observation_from_canonical_json(row["payload_json"])
+
     def apply_observation(
         self,
         *,
         observation: MarketObservation,
-        candidates: tuple[PaperFillCandidate, ...],
-        snapshot: PaperProductSnapshot,
+        candidates: tuple[PaperFillCandidate, ...] = (),
+        snapshot: PaperProductSnapshot | None = None,
+        candidate_factory: Callable[[int], tuple[PaperFillCandidate, ...]] | None = None,
+        snapshot_factory: Callable[[int, tuple[PaperFillCandidate, ...]], PaperProductSnapshot] | None = None,
     ) -> PaperObservationResult:
-        """Atomically accept one observation, its fills, cursor, book, and product snapshot."""
-        self._assert_snapshot_scope(observation, snapshot)
+        """Atomically accept one observation, matching result, and product snapshot."""
+        if snapshot is not None:
+            self._assert_snapshot_scope(observation, snapshot)
         observation_payload = _canonical_json(observation.to_canonical_dict())
         scope = (observation.account_id, observation.product.value, observation.symbol)
 
@@ -196,9 +309,17 @@ class PaperStore:
                 return PaperObservationResult(
                     disposition=ObservationDisposition.REJECTED_TERMINAL, paper_event_sequence=None
                 )
-            self._assert_candidates_mutable(candidates)
-
             sequence = self._allocate_sequence()
+            if candidate_factory is not None:
+                candidates = candidate_factory(sequence)
+            self._assert_candidates_mutable(candidates)
+            if snapshot_factory is not None:
+                snapshot = snapshot_factory(sequence, candidates)
+            if snapshot is None:
+                raise ValueError("paper observation requires a product snapshot")
+            self._assert_snapshot_scope(observation, snapshot)
+
+            
             self._append_event(
                 sequence=sequence,
                 event_type="observation_accepted",
@@ -233,33 +354,7 @@ class PaperStore:
                 if candidate.paper_event_sequence != sequence:
                     raise ValueError("paper fill candidate sequence must equal the durable event sequence")
                 self._persist_fill(candidate, sequence)
-            snapshot_sequence = PaperProductSnapshot(
-                account_id=snapshot.account_id,
-                product=snapshot.product,
-                scope=snapshot.scope,
-                schema_version=snapshot.schema_version,
-                payload=snapshot.payload,
-                paper_event_sequence=sequence,
-            )
-            self._connection.execute(
-                """
-                INSERT INTO paper_product_snapshots(
-                    account_id, product, scope, schema_version, payload_json, paper_event_sequence
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(account_id, product, scope) DO UPDATE SET
-                    schema_version = excluded.schema_version,
-                    payload_json = excluded.payload_json,
-                    paper_event_sequence = excluded.paper_event_sequence
-                """,
-                (
-                    snapshot_sequence.account_id,
-                    snapshot_sequence.product,
-                    snapshot_sequence.scope,
-                    snapshot_sequence.schema_version,
-                    _canonical_json(dict(snapshot_sequence.payload)),
-                    sequence,
-                ),
-            )
+            self._persist_snapshot(snapshot, sequence)
         return PaperObservationResult(ObservationDisposition.ACCEPTED, sequence)
 
     def request_cancellation(
@@ -295,7 +390,7 @@ class PaperStore:
         return PaperCancellationResult(CancellationDisposition.REQUESTED, sequence)
 
     def persist_cancellation_evidence(
-        self, client_order_id: str, *, cancellation_id: str
+        self, client_order_id: str, *, cancellation_id: str, snapshot: PaperProductSnapshot | None = None
     ) -> PaperCancellationResult:
         """Persist definitive cancellation evidence only after a durable request exists."""
         with transaction(self._connection):
@@ -327,6 +422,12 @@ class PaperStore:
                 """,
                 (sequence, client_order_id),
             )
+            if snapshot is not None:
+                if (snapshot.account_id, snapshot.product, snapshot.scope) != (
+                    order["account_id"], order["product"], order["symbol"]
+                ):
+                    raise ValueError("paper cancellation snapshot scope must match order")
+                self._persist_snapshot(snapshot, sequence)
             self._connection.execute(
                 """
                 UPDATE paper_cancellation_requests
@@ -336,6 +437,37 @@ class PaperStore:
                 (sequence, cancellation_id),
             )
         return PaperCancellationResult(CancellationDisposition.CANCELLED, sequence)
+
+    def _persist_snapshot(self, snapshot: PaperProductSnapshot, sequence: int) -> PaperProductSnapshot:
+        """Store one product projection under the event that established it."""
+        snapshot_sequence = PaperProductSnapshot(
+            account_id=snapshot.account_id,
+            product=snapshot.product,
+            scope=snapshot.scope,
+            schema_version=snapshot.schema_version,
+            payload=snapshot.payload,
+            paper_event_sequence=sequence,
+        )
+        self._connection.execute(
+            """
+            INSERT INTO paper_product_snapshots(
+                account_id, product, scope, schema_version, payload_json, paper_event_sequence
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, product, scope) DO UPDATE SET
+                schema_version = excluded.schema_version,
+                payload_json = excluded.payload_json,
+                paper_event_sequence = excluded.paper_event_sequence
+            """,
+            (
+                snapshot_sequence.account_id,
+                snapshot_sequence.product,
+                snapshot_sequence.scope,
+                snapshot_sequence.schema_version,
+                _canonical_json(dict(snapshot_sequence.payload)),
+                sequence,
+            ),
+        )
+        return snapshot_sequence
 
     def fetch_order(self, client_order_id: str) -> PaperOrder | None:
         row = self._connection.execute(
@@ -624,7 +756,7 @@ class PaperStore:
     def _order_row(self, client_order_id: str) -> sqlite3.Row:
         row = self._connection.execute(
             """
-            SELECT client_order_id, command_id, lifecycle_state
+            SELECT client_order_id, command_id, account_id, product, symbol, lifecycle_state
             FROM paper_orders WHERE client_order_id = ?
             """,
             (client_order_id,),
@@ -845,3 +977,70 @@ def _reject_floats(value: object) -> None:
 
 def _utc_now_text() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _command_from_canonical_json(payload: str) -> ExecutionCommand:
+    """Reconstruct only the canonical command saved by the PaperStore itself."""
+    try:
+        raw = json.loads(payload)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("stored paper command payload is invalid") from exc
+    if type(raw) is not dict or type(raw.get("context")) is not dict:
+        raise ValueError("stored paper command payload has no canonical context")
+    try:
+        return ExecutionCommand(
+            command_id=_payload_string(raw, "command_id"),
+            logical_command_key=_payload_string(raw, "logical_command_key"),
+            client_order_id=_payload_string(raw, "client_order_id"),
+            mode=Mode(_payload_string(raw, "mode")),
+            account_id=_payload_string(raw, "account_id"),
+            symbol=_payload_string(raw, "symbol"),
+            side=Side(_payload_string(raw, "side")),
+            order_type=OrderType(_payload_string(raw, "order_type")),
+            quantity=_payload_decimal(raw, "quantity"),
+            price=None if raw.get("price") is None else _payload_decimal(raw, "price"),
+            context=product_context_from_canonical_payload(_canonical_json(raw["context"])),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("stored paper command payload is contradictory") from exc
+
+
+def _observation_from_canonical_json(payload: str) -> MarketObservation:
+    """Rebuild a stored explicit market fact without inventing a clock or quote."""
+    try:
+        raw = json.loads(payload)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("stored paper observation payload is invalid") from exc
+    if type(raw) is not dict:
+        raise ValueError("stored paper observation payload is invalid")
+    try:
+        return MarketObservation(
+            observation_id=_payload_string(raw, "observation_id"),
+            account_id=_payload_string(raw, "account_id"),
+            product=ProductType(_payload_string(raw, "product")),
+            symbol=_payload_string(raw, "symbol"),
+            version=_observation_version(raw),
+            observed_at=_payload_datetime(raw, "observed_at"),
+            asks=_depth_levels(raw, "asks"),
+            bids=_depth_levels(raw, "bids"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("stored paper observation payload is contradictory") from exc
+
+
+
+def _observation_version(payload: dict[str, object]) -> int:
+    value = payload.get("version")
+    if type(value) is not int or value <= 0:
+        raise ValueError("stored paper observation version is invalid")
+    return value
+def _depth_levels(payload: dict[str, object], name: str) -> tuple[DepthLevel, ...]:
+    raw_levels = payload.get(name)
+    if type(raw_levels) is not list:
+        raise ValueError("stored paper observation depth is invalid")
+    levels: list[DepthLevel] = []
+    for raw in raw_levels:
+        if type(raw) is not dict:
+            raise ValueError("stored paper observation depth is invalid")
+        levels.append(DepthLevel(price=_payload_decimal(raw, "price"), quantity=_payload_decimal(raw, "quantity")))
+    return tuple(levels)

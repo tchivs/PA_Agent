@@ -49,6 +49,7 @@ from pa_agent.trading.gateways.paper.store import (
     ObservationDisposition,
     PaperOrder,
     PaperProductSnapshot,
+    PaperFill,
     PaperStore,
 )
 from pa_agent.trading.ports.gateway import (
@@ -58,6 +59,7 @@ from pa_agent.trading.ports.gateway import (
     GatewayUnavailableError,
     TradingGateway,
 )
+from pa_agent.trading.ports.ledger import LeasedSubmissionVerifier
 from pa_agent.trading.ports.ledger import OutboundSubmission
 
 _PAPER_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -72,6 +74,7 @@ class PaperOperationBatch:
     evidence: GatewayEvidence
     fills: tuple[Fill, ...]
     snapshots: tuple[PaperProductSnapshot, ...]
+    paper_fills: tuple[PaperFill, ...] = ()
 
 
 class PaperGateway(TradingGateway):
@@ -87,6 +90,7 @@ class PaperGateway(TradingGateway):
         initial_perpetual_accounts: Mapping[str, PaperPerpetualAccounting] | None = None,
         fault_plan: FaultPlan | None = None,
         operation_observer: GatewayOperationObserver | None = None,
+        leased_submission_verifier: LeasedSubmissionVerifier | None = None,
     ) -> None:
         if type(store) is not PaperStore:
             raise TypeError("PaperGateway requires its independent PaperStore")
@@ -96,10 +100,13 @@ class PaperGateway(TradingGateway):
             raise TypeError("PaperGateway fault plan must be canonical")
         if operation_observer is not None and not isinstance(operation_observer, GatewayOperationObserver):
             raise TypeError("PaperGateway operation observer must implement GatewayOperationObserver")
+        if leased_submission_verifier is not None and not isinstance(leased_submission_verifier, LeasedSubmissionVerifier):
+            raise TypeError("PaperGateway leased submission verifier must implement the durable lease contract")
         self._store = store
         self._policy = policy
         self._fault_plan = fault_plan
         self._operation_observer = operation_observer
+        self._leased_submission_verifier = leased_submission_verifier
         self._submission_invocations = 0
         if initial_balances is not None:
             if self._policy is not None and self._policy.product is not ProductType.SPOT:
@@ -216,6 +223,9 @@ class PaperGateway(TradingGateway):
         """Accept only a leased outbound authorization and dispatch by canonical product context."""
         if type(outbound) is not OutboundSubmission:
             raise TypeError("PaperGateway accepts only a leased OutboundSubmission")
+        if self._leased_submission_verifier is None:
+            raise GatewayUnavailableError("PaperGateway submission requires a durable leased authorization verifier")
+        self._leased_submission_verifier.validate_leased_outbound_submission(outbound)
         if type(outbound.command.context) is SpotOrderContext:
             return self._submit_spot_order(outbound)
         if type(outbound.command.context) is IsolatedMarginOrderContext:
@@ -736,6 +746,7 @@ class PaperGateway(TradingGateway):
             evidence=evidence,
             fills=self.list_fills(order.command_id),
             snapshots=(snapshot,),
+            paper_fills=self._store.list_fills(order.command_id),
         )
 
     def _result_for_order(

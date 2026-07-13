@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pa_agent.trading.domain.approval import (
     ApprovalTicket,
@@ -24,6 +24,9 @@ from pa_agent.trading.domain.models import (
     OrderState,
 )
 from pa_agent.trading.domain.risk import EvidenceBundle, RiskAssessment
+
+if TYPE_CHECKING:
+    from pa_agent.trading.application.paper_projection import PaperProjectionBatch
 
 _NONTERMINAL_SUBMISSION_STATES = frozenset(
     {
@@ -67,6 +70,13 @@ class OutboundSubmission:
         if self.command.client_order_id != self.client_order_id:
             raise ValueError("outbound submission command must use its generated client-order ID")
 
+
+@runtime_checkable
+class LeasedSubmissionVerifier(Protocol):
+    """Read-only proof that a gateway-facing value came from an active durable lease."""
+
+    def validate_leased_outbound_submission(self, outbound: OutboundSubmission) -> None:
+        """Fail closed unless the exact value is backed by one active durable lease."""
 
 @dataclass(frozen=True)
 class OutboundDispatchPermit:
@@ -156,6 +166,15 @@ class ExecutionLedger(Protocol):
         permit into a gateway-facing value.
         """
 
+    def validate_leased_outbound_submission(self, outbound: OutboundSubmission) -> None:
+        """Fail closed unless ``outbound`` exactly matches one durable leased authorization.
+
+        Gateways call this read-only check immediately before their one submission
+        mutation.  It prevents a locally constructed ``OutboundSubmission`` from
+        being treated as authority while preserving the coordinator's
+        permit-to-lease route.
+        """
+
     def mark_outbound_submission_ambiguous(self, outbound: OutboundSubmission) -> None:
         """Record local ambiguity for an already-authorized outbound submission."""
 
@@ -233,10 +252,10 @@ class ExecutionLedger(Protocol):
         *,
         assessment_ids: tuple[str, ...],
     ) -> bool:
-        """Move LATCHED only through exact assessment IDs or ledger-owned clearance."""
+        """Move LATCHED only through ledger-loaded exact scopes and accepted assessment IDs."""
 
     def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
-        """Return each persisted account/product scope needing fresh gateway evidence."""
+        """Return immutable durable target/account/product/key/policy recovery scopes."""
 
     def complete_kill_switch_recovery(
         self,
@@ -244,7 +263,7 @@ class ExecutionLedger(Protocol):
         *,
         assessment_ids: tuple[str, ...],
     ) -> bool:
-        """Return READY only through separately revalidated current clearance."""
+        """Return READY only through a one-time later exact-scope assessment transition."""
 
     def list_unresolved_reconciliation_jobs(self) -> tuple[ReconciliationJob, ...]:
         """Return persisted non-terminal jobs without allocating replacement identities."""
@@ -253,3 +272,6 @@ class ExecutionLedger(Protocol):
         self, job: ReconciliationJob, evidence: GatewayEvidence
     ) -> ReconciliationResult:
         """Append legal normalized evidence or retain state and record an incident."""
+
+    def apply_paper_projection(self, batch: PaperProjectionBatch) -> None:
+        """Atomically append an idempotent Paper audit batch without touching Paper truth."""

@@ -397,6 +397,35 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 outbound_attempt_token=permit.outbound_attempt_proof,
             )
 
+    def validate_leased_outbound_submission(self, outbound: OutboundSubmission) -> None:
+        """Verify the exact command and opaque proof against a durable active lease."""
+        if type(outbound) is not OutboundSubmission:
+            raise TypeError("outbound validation requires a ledger-produced outbound submission")
+        row = self._require_connection().execute(
+            """
+            SELECT commands.command_json
+            FROM outbound_dispatch_attempts AS attempts
+            JOIN order_commands AS commands ON commands.command_id = attempts.command_id
+            JOIN reconciliation_jobs AS jobs ON jobs.command_id = commands.command_id
+            WHERE attempts.command_id = ?
+              AND attempts.client_order_id = ?
+              AND attempts.reconciliation_job_id = ?
+              AND attempts.outbound_attempt_proof = ?
+              AND attempts.status = ?
+              AND jobs.job_id = ?
+            """,
+            (
+                outbound.command_id,
+                outbound.client_order_id,
+                outbound.reconciliation_job_id,
+                outbound.outbound_attempt_token,
+                "leased",
+                outbound.reconciliation_job_id,
+            ),
+        ).fetchone()
+        if row is None or row[0] != _canonical_json(outbound.command.to_canonical_dict()):
+            raise LedgerStorageError("outbound submission does not match a durable leased authorization")
+
     def _mark_leased_outbound_ambiguous(
         self, outbound: OutboundSubmission, *, event: LifecycleEvent = LifecycleEvent.LOCAL_TIMEOUT
     ) -> None:
@@ -653,6 +682,159 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 detail={"fill_id": fill.fill_id, "observed": canonicalize(fill)},
             )
             return False
+
+    def apply_paper_projection(self, batch: object) -> None:
+        """Append one immutable Paper audit batch without querying or mutating Paper truth."""
+        from pa_agent.trading.application.paper_projection import PaperProjectionBatch
+
+        if type(batch) is not PaperProjectionBatch:
+            raise TypeError("central Paper projection requires an immutable PaperProjectionBatch")
+        if len(batch.snapshots) != 1:
+            raise LedgerStorageError("Paper operation batches must carry one exact account scope")
+        snapshot = batch.snapshots[0]
+        if snapshot.paper_event_sequence is None:
+            raise LedgerStorageError("Paper projection snapshot must be committed")
+        if any(fill.provenance_json is None for fill in batch.fills):
+            raise LedgerStorageError("Paper projection requires complete canonical fill provenance")
+
+        connection = self._require_connection()
+        with transaction(connection):
+            cursor_row = connection.execute(
+                """
+                SELECT paper_event_sequence FROM paper_projection_cursors
+                WHERE account_id = ? AND product = ? AND scope = ?
+                """,
+                (snapshot.account_id, snapshot.product, snapshot.scope),
+            ).fetchone()
+            cursor = 0 if cursor_row is None else int(cursor_row[0])
+            evidence_jsons = tuple(_canonical_json(canonicalize(evidence)) for evidence in batch.evidence)
+            for evidence_json in evidence_jsons:
+                identity = (batch.reference.operation_id, batch.source_sequence)
+                existing = connection.execute(
+                    """
+                    SELECT client_order_id, evidence_json FROM paper_projection_evidence
+                    WHERE operation_id = ? AND paper_event_sequence = ?
+                    """,
+                    identity,
+                ).fetchone()
+                expected = (batch.reference.client_order_id, evidence_json)
+                if existing is None:
+                    connection.execute(
+                        """
+                        INSERT INTO paper_projection_evidence(
+                            operation_id, paper_event_sequence, client_order_id, evidence_json
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (*identity, *expected),
+                    )
+                elif tuple(existing) != expected:
+                    self._record_paper_projection_incident(
+                        kind="contradictory_paper_projection_evidence",
+                        identity={"operation_id": identity[0], "paper_event_sequence": identity[1]},
+                        observed={"existing": tuple(existing), "incoming": expected},
+                    )
+
+            for fill in batch.fills:
+                fill_json = _canonical_json(canonicalize(fill.fill))
+                existing = connection.execute(
+                    """
+                    SELECT command_id, paper_event_sequence, fill_json, provenance_json
+                    FROM paper_projection_fills WHERE paper_fill_id = ?
+                    """,
+                    (fill.paper_fill_id,),
+                ).fetchone()
+                expected = (fill.fill.command_id, fill.paper_event_sequence, fill_json, fill.provenance_json)
+                if existing is not None:
+                    if tuple(existing) != expected:
+                        self._record_paper_projection_incident(
+                            kind="contradictory_paper_projection_fill",
+                            identity={"paper_fill_id": fill.paper_fill_id},
+                            observed={"existing": tuple(existing), "incoming": expected},
+                        )
+                    continue
+                if fill.paper_event_sequence <= cursor:
+                    self._record_paper_projection_incident(
+                        kind="missing_paper_projection_fill_before_cursor",
+                        identity={"paper_fill_id": fill.paper_fill_id},
+                        observed={"paper_event_sequence": fill.paper_event_sequence, "cursor": cursor},
+                    )
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO paper_projection_fills(
+                        paper_fill_id, command_id, paper_event_sequence, fill_json, provenance_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (fill.paper_fill_id, *expected),
+                )
+
+            snapshot_payload = _canonical_json(dict(snapshot.payload))
+            snapshot_identity = (
+                snapshot.account_id,
+                snapshot.product,
+                snapshot.scope,
+                snapshot.paper_event_sequence,
+            )
+            existing_snapshot = connection.execute(
+                """
+                SELECT schema_version, payload_json FROM paper_projection_snapshots
+                WHERE account_id = ? AND product = ? AND scope = ? AND paper_event_sequence = ?
+                """,
+                snapshot_identity,
+            ).fetchone()
+            expected_snapshot = (snapshot.schema_version, snapshot_payload)
+            if existing_snapshot is None and snapshot.paper_event_sequence <= cursor:
+                self._record_paper_projection_incident(
+                    kind="missing_paper_projection_snapshot_before_cursor",
+                    identity={"scope": snapshot_identity},
+                    observed={"cursor": cursor},
+                )
+            elif existing_snapshot is None:
+                connection.execute(
+                    """
+                    INSERT INTO paper_projection_snapshots(
+                        account_id, product, scope, paper_event_sequence, schema_version, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (*snapshot_identity, *expected_snapshot),
+                )
+            elif tuple(existing_snapshot) != expected_snapshot:
+                self._record_paper_projection_incident(
+                    kind="contradictory_paper_projection_snapshot",
+                    identity={"scope": snapshot_identity},
+                    observed={"existing": tuple(existing_snapshot), "incoming": expected_snapshot},
+                )
+
+            if batch.source_sequence > cursor:
+                connection.execute(
+                    """
+                    INSERT INTO paper_projection_cursors(account_id, product, scope, paper_event_sequence)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(account_id, product, scope) DO UPDATE
+                    SET paper_event_sequence = excluded.paper_event_sequence
+                    WHERE paper_projection_cursors.paper_event_sequence < excluded.paper_event_sequence
+                    """,
+                    (snapshot.account_id, snapshot.product, snapshot.scope, batch.source_sequence),
+                )
+
+    def _record_paper_projection_incident(
+        self, *, kind: str, identity: Mapping[str, object], observed: Mapping[str, object]
+    ) -> None:
+        """Record a projection contradiction without replacing already established audit facts."""
+        self._require_connection().execute(
+            """
+            INSERT INTO paper_projection_incidents(
+                incident_id, kind, identity_json, observed_json, recorded_at_utc
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("paper-projection-incident"),
+                kind,
+                _canonical_json(canonicalize(identity)),
+                _canonical_json(canonicalize(observed)),
+                _timestamp_text(self.utc_now()),
+            ),
+        )
 
     def record_account_observation(self, observation: AccountObservation) -> str:
         """Persist one typed canonical observation without accepting raw venue payloads."""
@@ -1181,6 +1363,7 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 assessment.persistent_scope_id != scope.persistent_scope_id
                 or assessment.scope_digest != scope.scope_digest
                 or assessment.target_digest != scope.target_digest
+                or assessment.policy_id != scope.policy_id
                 or assessment.policy_version != scope.policy_version
                 or assessment.policy_digest != scope.policy_digest
                 or assessment.recovery_assessment_id is not None
@@ -1203,15 +1386,16 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 """
                 INSERT INTO recovery_assessments(
                     recovery_assessment_id, persistent_scope_id, scope_digest, target_digest,
-                    policy_version, policy_digest, evidence_digest, evidence_json, accepted,
+                    policy_id, policy_version, policy_digest, evidence_digest, evidence_json, accepted,
                     reason_codes_json, observed_at_utc, recorded_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     assessment_id,
                     assessment.persistent_scope_id,
                     assessment.scope_digest,
                     assessment.target_digest,
+                    assessment.policy_id,
                     assessment.policy_version,
                     assessment.policy_digest,
                     assessment.evidence_digest,
@@ -1264,13 +1448,18 @@ class SQLiteExecutionLedger(ExecutionLedger):
                 self._create_zero_scope_recovery_transition_in_transaction(
                     begin_event_id, zero_scope_proof, now
                 )
+            else:
+                self._create_product_scope_recovery_transitions_in_transaction(
+                    assessment_ids, now
+                )
             return True
 
     def list_kill_switch_recovery_scopes(self) -> tuple[RecoveryScope, ...]:
         """Return only active immutable scopes created at the durable latch boundary."""
         rows = self._require_connection().execute(
             """
-            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest, scope_digest
+            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest,
+                   scope_digest, product_context_json, product_scope_key, policy_id, legacy_spot_scope
             FROM recovery_scopes WHERE active = 1 ORDER BY persistent_scope_id
             """
         ).fetchall()
@@ -1326,8 +1515,11 @@ class SQLiteExecutionLedger(ExecutionLedger):
             ):
                 return False
             now = self.utc_now()
-            if zero_scope_proof is not None and not self._consume_zero_scope_recovery_transition_in_transaction(
-                zero_scope_proof, now
+            if zero_scope_proof is not None:
+                if not self._consume_zero_scope_recovery_transition_in_transaction(zero_scope_proof, now):
+                    return False
+            elif not self._consume_product_scope_recovery_transitions_in_transaction(
+                assessment_ids, now
             ):
                 return False
             self._set_kill_switch_status_in_transaction(
@@ -1870,50 +2062,178 @@ class SQLiteExecutionLedger(ExecutionLedger):
         )
         return consumed.rowcount == 1
 
+    def _create_product_scope_recovery_transitions_in_transaction(
+        self, assessment_ids: tuple[str, ...], began_at: datetime
+    ) -> None:
+        """Persist the exact begin assessment that each nonzero scope must later supersede."""
+        placeholders = ", ".join("?" for _ in assessment_ids)
+        rows = self._require_connection().execute(
+            f"""
+            SELECT recovery_assessment_id, persistent_scope_id, evidence_digest
+            FROM recovery_assessments
+            WHERE recovery_assessment_id IN ({placeholders})
+            """,
+            assessment_ids,
+        ).fetchall()
+        if len(rows) != len(assessment_ids) or {row[0] for row in rows} != set(assessment_ids):
+            raise LedgerStorageError("recovery begin assessments are not durable")
+        for assessment_id, persistent_scope_id, evidence_digest in rows:
+            self._require_connection().execute(
+                """
+                INSERT INTO product_scope_recovery_transitions(
+                    persistent_scope_id, begin_recovery_assessment_id, begin_evidence_digest,
+                    began_at_utc, status, completion_recovery_assessment_id, consumed_at_utc
+                ) VALUES (?, ?, ?, ?, 'pending', NULL, NULL)
+                """,
+                (persistent_scope_id, assessment_id, evidence_digest, _timestamp_text(began_at)),
+            )
+
+    def _consume_product_scope_recovery_transitions_in_transaction(
+        self, assessment_ids: tuple[str, ...], now: datetime
+    ) -> bool:
+        """Atomically consume only fresh later assessment IDs for every active product scope."""
+        placeholders = ", ".join("?" for _ in assessment_ids)
+        rows = self._require_connection().execute(
+            f"""
+            SELECT transition.persistent_scope_id, transition.begin_recovery_assessment_id,
+                   transition.begin_evidence_digest, transition.began_at_utc, transition.status,
+                   assessment.recovery_assessment_id, assessment.evidence_digest,
+                   assessment.observed_at_utc
+            FROM product_scope_recovery_transitions AS transition
+            JOIN recovery_scopes AS scope ON scope.persistent_scope_id = transition.persistent_scope_id
+            JOIN recovery_assessments AS assessment ON assessment.persistent_scope_id = scope.persistent_scope_id
+            WHERE scope.active = 1 AND assessment.recovery_assessment_id IN ({placeholders})
+            """,
+            assessment_ids,
+        ).fetchall()
+        if len(rows) != len(assessment_ids) or {row[5] for row in rows} != set(assessment_ids):
+            return False
+        for (
+            persistent_scope_id,
+            begin_assessment_id,
+            begin_evidence_digest,
+            began_at,
+            status,
+            assessment_id,
+            evidence_digest,
+            observed_at,
+        ) in rows:
+            try:
+                began = _timestamp_from_text(str(began_at))
+                observed = _timestamp_from_text(str(observed_at))
+            except LedgerStorageError:
+                return False
+            if (
+                status != "pending"
+                or assessment_id == begin_assessment_id
+                or observed <= began
+            ):
+                return False
+            consumed = self._require_connection().execute(
+                """
+                UPDATE product_scope_recovery_transitions
+                SET status = 'consumed', completion_recovery_assessment_id = ?, consumed_at_utc = ?
+                WHERE persistent_scope_id = ? AND status = 'pending'
+                  AND begin_recovery_assessment_id = ? AND begin_evidence_digest = ?
+                """,
+                (
+                    assessment_id,
+                    _timestamp_text(now),
+                    persistent_scope_id,
+                    begin_assessment_id,
+                    begin_evidence_digest,
+                ),
+            )
+            if consumed.rowcount != 1:
+                return False
+        return True
+
     def _replace_recovery_scopes_in_transaction(self, created_at: str) -> None:
-        """Snapshot the fixed target/policy set at each latch, never from a recovery caller."""
+        """Snapshot exact command target/context/policy scopes at each latch."""
         connection = self._require_connection()
         connection.execute("UPDATE recovery_scopes SET active = 0 WHERE active = 1")
         command_rows = connection.execute(
-            "SELECT DISTINCT mode, account_id, product FROM order_commands ORDER BY mode, account_id, product"
+            """
+            SELECT DISTINCT mode, account_id, product, symbol, product_context_json,
+                   product_context_digest, policy_id, policy_version_bound, policy_digest_bound
+            FROM order_commands
+            ORDER BY mode, account_id, product, symbol, product_context_json
+            """
         ).fetchall()
-        for mode, account_id, product in command_rows:
+        for (
+            mode,
+            account_id,
+            product,
+            symbol,
+            context_json,
+            context_digest,
+            policy_id,
+            policy_version,
+            policy_digest,
+        ) in command_rows:
             try:
-                target = ExecutionTarget(
-                    target_id="paper-spot-primary",
-                    mode=Mode(str(mode)),
-                    account_id=str(account_id),
-                    product=ProductType(str(product)),
+                product_type = ProductType(str(product))
+                if context_json is None and policy_id is None and policy_version is None and policy_digest is None:
+                    context = SpotOrderContext()
+                    target = ExecutionTarget("paper-spot-primary", Mode(str(mode)), str(account_id), product_type)
+                    policy = select_phase2_policy(target)
+                    legacy_spot_scope = 1
+                else:
+                    if not all(
+                        isinstance(value, str) and value
+                        for value in (context_json, context_digest, policy_id, policy_version, policy_digest)
+                    ):
+                        raise ValueError("durable product recovery scope is incomplete")
+                    context = product_context_from_canonical_payload(context_json)
+                    if product_context_digest(context) != context_digest:
+                        raise ValueError("durable product recovery context digest mismatches")
+                    if policy_version == "phase2-v1":
+                        if product_type is not ProductType.SPOT or type(context) is not SpotOrderContext:
+                            raise ValueError("legacy recovery scope is not Spot")
+                        target = ExecutionTarget("paper-spot-primary", Mode(str(mode)), str(account_id), product_type)
+                        policy = select_phase2_policy(target)
+                        legacy_spot_scope = 1
+                    else:
+                        target = ExecutionTarget(str(policy_id), Mode(str(mode)), str(account_id), product_type)
+                        policy = select_paper_product_policy(target, context)
+                        legacy_spot_scope = 0
+                    if (
+                        policy.policy_id != policy_id
+                        or policy.policy_version != policy_version
+                        or policy.policy_digest != policy_digest
+                    ):
+                        raise ValueError("durable product recovery policy mismatches")
+                scope = RecoveryScope.from_ledger_values(
+                    persistent_scope_id=_new_id("recovery-scope"),
+                    target=target,
+                    product_context=context,
+                    product_scope_key=str(symbol),
+                    policy_id=policy.policy_id,
+                    policy_version=policy.policy_version,
+                    policy_digest=policy.policy_digest,
                 )
-                policy = select_phase2_policy(target)
-            except (TypeError, ValueError) as exc:
-                raise LedgerStorageError("durable recovery scope is not a fixed Phase 2 target") from exc
-            target_json = _canonical_json(canonicalize(target))
-            target_digest = _digest_text(target_json)
-            scope_digest = _digest_text(
-                _canonical_json(
-                    {
-                        "target_digest": target_digest,
-                        "policy_version": policy.policy_version,
-                        "policy_digest": policy.policy_digest,
-                    }
-                )
-            )
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise LedgerStorageError("durable recovery scope is invalid") from exc
             connection.execute(
                 """
                 INSERT INTO recovery_scopes(
                     persistent_scope_id, target_json, target_digest, policy_version, policy_digest,
-                    scope_digest, active, created_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                    scope_digest, active, created_at_utc, product_context_json, product_scope_key,
+                    policy_id, legacy_spot_scope
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
                 """,
                 (
-                    _new_id("recovery-scope"),
-                    target_json,
-                    target_digest,
-                    policy.policy_version,
-                    policy.policy_digest,
-                    scope_digest,
+                    scope.persistent_scope_id,
+                    _canonical_json(canonicalize(scope.target)),
+                    scope.target_digest,
+                    scope.policy_version,
+                    scope.policy_digest,
+                    scope.scope_digest,
                     created_at,
+                    product_context_to_canonical_payload(scope.product_context),
+                    scope.product_scope_key,
+                    scope.policy_id,
+                    legacy_spot_scope,
                 ),
             )
 
@@ -1923,7 +2243,8 @@ class SQLiteExecutionLedger(ExecutionLedger):
         """Load exactly one active scope using the opaque ledger-issued identity."""
         row = self._require_connection().execute(
             """
-            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest, scope_digest
+            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest,
+                   scope_digest, product_context_json, product_scope_key, policy_id, legacy_spot_scope
             FROM recovery_scopes WHERE persistent_scope_id = ? AND active = 1
             """,
             (persistent_scope_id,),
@@ -1931,101 +2252,87 @@ class SQLiteExecutionLedger(ExecutionLedger):
         return None if row is None else _recovery_scope_from_row(row)
 
     @staticmethod
-    def _recovery_evidence_is_complete(evidence_json: str, evidence_digest: str) -> bool:
-        """Require canonical storage of every recovery observation before clearance is durable."""
+    def _recovery_evidence_is_complete(
+        evidence_json: str, evidence_digest: str, scope: RecoveryScope, now: datetime
+    ) -> bool:
+        """Reconstruct the complete exact product evidence before every READY transition."""
         try:
-            evidence = json.loads(evidence_json)
-        except (TypeError, json.JSONDecodeError):
+            RecoveryEvidence.from_canonical_json(evidence_json, evidence_digest, scope, now)
+        except ValueError:
             return False
-        required_observations = {
-            "capabilities",
-            "rules",
-            "account",
-            "quote",
-            "server_time",
-            "connection",
-            "open_orders",
-            "order_rate",
-            "loss_drawdown",
-            "fee_rate",
-        }
-        if (
-            not isinstance(evidence, dict)
-            or set(evidence) != required_observations
-            or _canonical_json(evidence) != evidence_json
-            or _digest_text(evidence_json) != evidence_digest
-        ):
-            return False
-        return all(isinstance(evidence[name], dict) and evidence[name] for name in required_observations)
+        return True
 
     def _recovery_assessments_match_current_scopes_in_transaction(
         self, assessment_ids: tuple[str, ...]
     ) -> bool:
-        """Verify exact active-scope coverage and all clearance predicates in this transaction."""
+        """Verify exact active product-scope coverage and complete fresh evidence in one transaction."""
         if not assessment_ids or len(set(assessment_ids)) != len(assessment_ids):
             return False
         connection = self._require_connection()
-        scopes = connection.execute(
+        scope_rows = connection.execute(
             """
-            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest, scope_digest
+            SELECT persistent_scope_id, target_json, target_digest, policy_version, policy_digest,
+                   scope_digest, product_context_json, product_scope_key, policy_id, legacy_spot_scope
             FROM recovery_scopes WHERE active = 1 ORDER BY persistent_scope_id
             """
         ).fetchall()
-        if len(scopes) != len(assessment_ids):
+        if len(scope_rows) != len(assessment_ids):
+            return False
+        try:
+            scopes: dict[str, RecoveryScope] = {}
+            for row in scope_rows:
+                scope = _recovery_scope_from_row(row)
+                scopes[scope.persistent_scope_id] = scope
+        except LedgerStorageError:
             return False
         placeholders = ", ".join("?" for _ in assessment_ids)
         rows = connection.execute(
             f"""
-            SELECT assessment.recovery_assessment_id, assessment.persistent_scope_id,
-                   assessment.scope_digest, assessment.target_digest, assessment.policy_version,
-                   assessment.policy_digest, assessment.evidence_digest, assessment.evidence_json,
-                   assessment.accepted, assessment.observed_at_utc,
-                   scope.target_digest, scope.policy_version, scope.policy_digest, scope.scope_digest
-            FROM recovery_assessments AS assessment
-            JOIN recovery_scopes AS scope ON scope.persistent_scope_id = assessment.persistent_scope_id
-            WHERE scope.active = 1 AND assessment.recovery_assessment_id IN ({placeholders})
+            SELECT recovery_assessment_id, persistent_scope_id, scope_digest, target_digest,
+                   policy_id, policy_version, policy_digest, evidence_digest, evidence_json,
+                   accepted, observed_at_utc
+            FROM recovery_assessments
+            WHERE recovery_assessment_id IN ({placeholders})
             """,
             assessment_ids,
         ).fetchall()
         if len(rows) != len(assessment_ids) or {row[0] for row in rows} != set(assessment_ids):
             return False
-        expected_scope_ids = {row[0] for row in scopes}
         now = self.utc_now()
-        for row in rows:
-            (
-                _,
-                persistent_scope_id,
-                scope_digest,
-                target_digest,
-                policy_version,
-                policy_digest,
-                evidence_digest,
-                evidence_json,
-                accepted,
-                observed_at,
-                durable_target_digest,
-                durable_policy_version,
-                durable_policy_digest,
-                durable_scope_digest,
-            ) = row
-            if persistent_scope_id not in expected_scope_ids or accepted != 1:
+        for (
+            _,
+            persistent_scope_id,
+            scope_digest,
+            target_digest,
+            policy_id,
+            policy_version,
+            policy_digest,
+            evidence_digest,
+            evidence_json,
+            accepted,
+            observed_at,
+        ) in rows:
+            scope = scopes.get(str(persistent_scope_id))
+            if scope is None or accepted != 1:
                 return False
             if (
-                scope_digest != durable_scope_digest
-                or target_digest != durable_target_digest
-                or policy_version != durable_policy_version
-                or policy_digest != durable_policy_digest
-                or not self._recovery_evidence_is_complete(str(evidence_json), str(evidence_digest))
+                scope_digest != scope.scope_digest
+                or target_digest != scope.target_digest
+                or policy_id != scope.policy_id
+                or policy_version != scope.policy_version
+                or policy_digest != scope.policy_digest
+                or not self._recovery_evidence_is_complete(
+                    str(evidence_json), str(evidence_digest), scope, now
+                )
             ):
                 return False
             try:
                 observed = _timestamp_from_text(str(observed_at))
             except LedgerStorageError:
                 return False
-            age_seconds = (now.astimezone(UTC) - observed).total_seconds()
-            if age_seconds < 0 or age_seconds > 60:
+            if not _is_recovery_timestamp_fresh(observed, now):
                 return False
-        return {row[1] for row in rows} == expected_scope_ids
+        return {str(row[1]) for row in rows} == set(scopes)
 
     def _set_kill_switch_status_in_transaction(
         self,
@@ -2189,7 +2496,7 @@ def _command_from_canonical_json(command_json: str) -> ExecutionCommand:
 
 
 def _recovery_scope_from_row(row: tuple[object, ...]) -> RecoveryScope:
-    """Rebuild a scope only from its immutable persisted snapshot."""
+    """Rebuild current exact scopes and fail-closed historical Spot-only scope rows."""
     try:
         target_data = json.loads(str(row[1]))
         target = ExecutionTarget(
@@ -2198,14 +2505,39 @@ def _recovery_scope_from_row(row: tuple[object, ...]) -> RecoveryScope:
             account_id=str(target_data["account_id"]),
             product=ProductType(str(target_data["product"])),
         )
-        return RecoveryScope(
+        context_json, product_scope_key, policy_id, legacy_spot_scope = row[6:10]
+        if bool(legacy_spot_scope):
+            if target.product is not ProductType.SPOT:
+                raise ValueError("legacy recovery scope must be Spot")
+            context = SpotOrderContext()
+            policy = select_phase2_policy(target)
+            key = str(product_scope_key) if isinstance(product_scope_key, str) and product_scope_key else "__legacy_spot_scope__"
+        else:
+            if not all(isinstance(value, str) and value for value in (context_json, product_scope_key, policy_id)):
+                raise ValueError("durable product recovery scope is incomplete")
+            context = product_context_from_canonical_payload(context_json)
+            policy = select_paper_product_policy(target, context)
+            if (
+                policy.policy_id != policy_id
+                or policy.policy_version != row[3]
+                or policy.policy_digest != row[4]
+            ):
+                raise ValueError("durable product recovery policy mismatches")
+            key = product_scope_key
+        scope = RecoveryScope.from_ledger_values(
             persistent_scope_id=str(row[0]),
             target=target,
-            target_digest=str(row[2]),
-            policy_version=str(row[3]),
-            policy_digest=str(row[4]),
-            scope_digest=str(row[5]),
+            product_context=context,
+            product_scope_key=key,
+            policy_id=policy.policy_id,
+            policy_version=policy.policy_version,
+            policy_digest=policy.policy_digest,
         )
+        if not bool(legacy_spot_scope) and (
+            scope.target_digest != row[2] or scope.scope_digest != row[5]
+        ):
+            raise ValueError("durable product recovery scope digest mismatches")
+        return scope
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise LedgerStorageError("stored recovery scope is invalid") from exc
 

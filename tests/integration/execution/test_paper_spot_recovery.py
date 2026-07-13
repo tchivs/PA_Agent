@@ -134,6 +134,7 @@ def test_leased_spot_submission_partial_fill_cancel_and_reopen_are_paper_owned(t
         store,
         policy=make_policy(),
         initial_balances={"USDT": "1000", "BTC": "0"},
+        leased_submission_verifier=ledger,
     )
     gateway.advance_market(_shallow_observation())
     evidence = SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(permit)
@@ -177,7 +178,9 @@ def test_later_observation_can_fill_only_the_residual_order_quantity(tmp_path: P
     """A higher observation version advances the persisted remainder without re-filling prior depth."""
     ledger, permit = _leased_permit(tmp_path / "ledger.sqlite")
     store = PaperStore(tmp_path / "paper.sqlite")
-    gateway = PaperGateway(store, policy=make_policy(), initial_balances={"USDT": "1000", "BTC": "0"})
+    gateway = PaperGateway(
+        store, policy=make_policy(), initial_balances={"USDT": "1000", "BTC": "0"}, leased_submission_verifier=ledger
+    )
     gateway.advance_market(_shallow_observation())
     SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(permit)
 
@@ -201,7 +204,9 @@ def test_later_observation_wins_over_prior_cancellation_request_without_releasin
     """Terminal outcome follows persisted paper-event order, not cancellation intent timing."""
     ledger, permit = _leased_permit(tmp_path / "ledger.sqlite")
     store = PaperStore(tmp_path / "paper.sqlite")
-    gateway = PaperGateway(store, policy=make_policy(), initial_balances={"USDT": "1000", "BTC": "0"})
+    gateway = PaperGateway(
+        store, policy=make_policy(), initial_balances={"USDT": "1000", "BTC": "0"}, leased_submission_verifier=ledger
+    )
     gateway.advance_market(_shallow_observation())
     SubmissionCoordinator(ledger=ledger, gateway=gateway).submit(permit)
 
@@ -238,6 +243,7 @@ def test_paper_direct_controls_observe_each_committed_result_once(tmp_path: Path
         policy=make_policy(),
         initial_balances={"USDT": "1000", "BTC": "0"},
         operation_observer=observer,
+        leased_submission_verifier=ledger,
     )
     try:
         gateway.advance_market(_shallow_observation())
@@ -282,6 +288,7 @@ def test_terminal_paper_cancellation_observes_committed_result_once(tmp_path: Pa
         policy=make_policy(),
         initial_balances={"USDT": "1000", "BTC": "0"},
         operation_observer=observer,
+        leased_submission_verifier=ledger,
     )
     try:
         gateway.advance_market(_shallow_observation())
@@ -307,6 +314,7 @@ def test_paper_observer_failure_keeps_committed_terminal_truth(tmp_path: Path) -
         policy=make_policy(),
         initial_balances={"USDT": "1000", "BTC": "0"},
         operation_observer=_RecordingOperationObserver(fail=True),
+        leased_submission_verifier=ledger,
     )
     try:
         gateway.advance_market(_shallow_observation())

@@ -9,6 +9,9 @@ from pa_agent.trading.domain.models import OrderType, Side
 from pa_agent.trading.gateways.paper.accounting_spot import PaperSpotAccounting
 from pa_agent.trading.gateways.paper.gateway import PaperGateway
 from pa_agent.trading.gateways.paper.store import PaperStore
+from pa_agent.trading.persistence.sqlite_connection import LedgerStorageError
+from pa_agent.trading.persistence.sqlite_ledger import SQLiteExecutionLedger
+from pa_agent.trading.ports.ledger import OutboundSubmission
 from pa_agent.trading.gateways.paper.matching import match_order
 from tests.fixtures.paper_scenarios import make_command, make_observation, make_policy
 
@@ -80,12 +83,50 @@ def test_insufficient_available_assets_reject_before_any_reservation() -> None:
 
 
 def test_gateway_rejects_direct_command_submission(tmp_path) -> None:
-    """The Paper gateway's only submission surface remains the leased outbound value."""
+    """Paper truth cannot mutate when a caller supplies a command instead of a leased value."""
+    store = PaperStore(tmp_path / "paper.sqlite")
     gateway = PaperGateway(
-        PaperStore(tmp_path / "paper.sqlite"),
+        store,
         policy=make_policy(),
         initial_balances={"USDT": "1000", "BTC": "0"},
     )
 
-    with pytest.raises(TypeError, match="OutboundSubmission"):
-        gateway.submit_order(make_command())
+    before_events = store.list_events()
+    try:
+        with pytest.raises(TypeError, match="OutboundSubmission"):
+            gateway.submit_order(make_command())
+        assert store.list_events() == before_events
+    finally:
+        store.close()
+
+
+def test_gateway_rejects_locally_constructed_outbound_without_mutating_paper_truth(tmp_path) -> None:
+    """A field-consistent lookalike has no matching SQLite lease and cannot reserve Paper assets."""
+    ledger = SQLiteExecutionLedger(tmp_path / "ledger.sqlite")
+    store = PaperStore(tmp_path / "paper.sqlite")
+    command = make_command()
+    gateway = PaperGateway(
+        store,
+        policy=make_policy(),
+        initial_balances={"USDT": "1000", "BTC": "0"},
+        leased_submission_verifier=ledger,
+    )
+    forged = OutboundSubmission(
+        command=command,
+        command_id=command.command_id,
+        client_order_id=command.client_order_id,
+        reconciliation_job_id="forged-job",
+        outbound_attempt_token="forged-token",
+    )
+    before_events = store.list_events()
+    before_snapshot = gateway.get_account_snapshot("paper-account", command.context.product)
+
+    try:
+        with pytest.raises(LedgerStorageError, match="durable leased authorization"):
+            gateway.submit_order(forged)
+        assert store.list_events() == before_events
+        assert store.fetch_order(command.client_order_id) is None
+        assert gateway.get_account_snapshot("paper-account", command.context.product) == before_snapshot
+    finally:
+        ledger.close()
+        store.close()

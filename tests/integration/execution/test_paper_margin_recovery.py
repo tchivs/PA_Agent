@@ -21,7 +21,7 @@ from pa_agent.trading.gateways.paper.accounting_margin import PaperMarginAccount
 from pa_agent.trading.gateways.paper.gateway import PaperGateway
 from pa_agent.trading.gateways.paper.store import PaperStore
 from pa_agent.trading.ports.gateway import GatewayUnavailableError
-from pa_agent.trading.ports.ledger import OutboundSubmission
+from tests.fixtures.paper_submission import TestLeasedSubmissionVerifier
 
 NOW = datetime(2026, 7, 13, tzinfo=UTC)
 
@@ -111,6 +111,7 @@ def test_reopened_margin_gateway_keeps_pair_state_and_rejects_cross_pair_queries
 def test_unhealthy_pair_rejects_before_persisting_a_margin_order_or_fill(tmp_path: Path) -> None:
     """Bad collateral and debt facts cannot be rescued by another pair or reach the matcher."""
     store = PaperStore(tmp_path / "paper-margin-reject.sqlite")
+    verifier = TestLeasedSubmissionVerifier()
     gateway = PaperGateway(
         store,
         policy=_policy(),
@@ -118,6 +119,7 @@ def test_unhealthy_pair_rejects_before_persisting_a_margin_order_or_fill(tmp_pat
             "BTCUSDT": _account("BTCUSDT", collateral="100", debt="20"),
             "ETHUSDT": _account("ETHUSDT", collateral="10", debt="9"),
         },
+        leased_submission_verifier=verifier,
     )
     gateway.advance_market(_observation("ETHUSDT", 2))
     command = ExecutionCommand(
@@ -132,13 +134,7 @@ def test_unhealthy_pair_rejects_before_persisting_a_margin_order_or_fill(tmp_pat
         quantity=Decimal("1"),
         context=IsolatedMarginOrderContext("ETHUSDT", borrow_asset="USDT", auto_repay=True),
     )
-    outbound = OutboundSubmission(
-        command=command,
-        command_id=command.command_id,
-        client_order_id=command.client_order_id,
-        reconciliation_job_id="unhealthy-margin-job",
-        outbound_attempt_token="unhealthy-margin-token",
-    )
+    outbound = verifier.lease(command)
 
     result = gateway.submit_order(outbound)
 
@@ -153,6 +149,7 @@ def test_unhealthy_pair_rejects_before_persisting_a_margin_order_or_fill(tmp_pat
 def test_margin_sell_fill_repays_its_own_interest_and_principal(tmp_path: Path) -> None:
     """A pair-scoped auto-repay settles interest first without using another pair's collateral."""
     store = PaperStore(tmp_path / "paper-margin-repay.sqlite")
+    verifier = TestLeasedSubmissionVerifier()
     gateway = PaperGateway(
         store,
         policy=_policy(),
@@ -160,6 +157,7 @@ def test_margin_sell_fill_repays_its_own_interest_and_principal(tmp_path: Path) 
             "BTCUSDT": _account("BTCUSDT", collateral="1000", debt="20"),
             "ETHUSDT": _account("ETHUSDT", collateral="10", debt="9"),
         },
+        leased_submission_verifier=verifier,
     )
     gateway.advance_market(_observation("BTCUSDT", 2))
     command = ExecutionCommand(
@@ -174,15 +172,7 @@ def test_margin_sell_fill_repays_its_own_interest_and_principal(tmp_path: Path) 
         quantity=Decimal("1"),
         context=IsolatedMarginOrderContext("BTCUSDT", borrow_asset="USDT", auto_repay=True),
     )
-    result = gateway.submit_order(
-        OutboundSubmission(
-            command=command,
-            command_id=command.command_id,
-            client_order_id=command.client_order_id,
-            reconciliation_job_id="repay-margin-job",
-            outbound_attempt_token="repay-margin-token",
-        )
-    )
+    result = gateway.submit_order(verifier.lease(command))
 
     assert result.evidence is not None
     assert result.evidence.state.value == "filled"

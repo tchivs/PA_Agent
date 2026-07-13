@@ -22,10 +22,12 @@ from pa_agent.trading.domain.models import (
 )
 from pa_agent.trading.domain.risk import (
     FeeRateObservation,
+    IsolatedMarginProductEvidence,
     LossDrawdownObservation,
     OpenOrderObservation,
     OrderRateObservation,
     TargetConnectionObservation,
+    UsdtPerpetualProductEvidence,
 )
 from pa_agent.trading.ports import ExecutionLedger, OutboundSubmission
 from pa_agent.trading.ports.gateway import (
@@ -51,6 +53,8 @@ def test_trading_gateway_exposes_the_complete_canonical_operation_surface() -> N
         "get_order_rate_window",
         "get_loss_drawdown",
         "get_fee_rate",
+        "get_isolated_margin_product_evidence",
+        "get_usdt_perpetual_product_evidence",
         "submit_order",
         "cancel_order",
         "lookup_order_by_client_id",
@@ -96,6 +100,16 @@ def test_trading_gateway_annotations_are_canonical_and_venue_neutral() -> None:
             "symbol": str,
             "quote_identifier": str,
             "return": FeeRateObservation,
+        },
+        "get_isolated_margin_product_evidence": {
+            "target": ExecutionTarget,
+            "isolated_symbol": str,
+            "return": IsolatedMarginProductEvidence,
+        },
+        "get_usdt_perpetual_product_evidence": {
+            "target": ExecutionTarget,
+            "symbol": str,
+            "return": UsdtPerpetualProductEvidence,
         },
         "submit_order": {"outbound": OutboundSubmission, "return": GatewayEvidence},
         "cancel_order": {"client_order_id": str, "return": GatewayEvidence},

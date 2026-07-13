@@ -19,10 +19,12 @@ from pa_agent.trading.domain.models import (
 )
 from pa_agent.trading.domain.risk import (
     FeeRateObservation,
+    IsolatedMarginProductEvidence,
     LossDrawdownObservation,
     OpenOrderObservation,
     OrderRateObservation,
     TargetConnectionObservation,
+    UsdtPerpetualProductEvidence,
 )
 from pa_agent.trading.ports.ledger import OutboundSubmission
 
@@ -93,6 +95,18 @@ class TradingGateway(ABC):
         self, target: ExecutionTarget, symbol: str, quote_identifier: str
     ) -> FeeRateObservation:
         """Return the current target/symbol/quote-bound fee rate version."""
+
+    @abstractmethod
+    def get_isolated_margin_product_evidence(
+        self, target: ExecutionTarget, isolated_symbol: str
+    ) -> IsolatedMarginProductEvidence:
+        """Return fresh exact-target and exact-pair isolated-margin facts only."""
+
+    @abstractmethod
+    def get_usdt_perpetual_product_evidence(
+        self, target: ExecutionTarget, symbol: str
+    ) -> UsdtPerpetualProductEvidence:
+        """Return fresh exact-target and exact-symbol perpetual facts only."""
 
     @abstractmethod
     def submit_order(self, outbound: OutboundSubmission) -> GatewayEvidence:

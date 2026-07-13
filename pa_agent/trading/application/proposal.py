@@ -16,6 +16,7 @@ from pa_agent.trading.domain.approval import (
     KillSwitchStatus,
     SourceAnalysisSnapshot,
 )
+from pa_agent.trading.domain.models import ProductContext
 from pa_agent.trading.domain.errors import ConversionRejection, RiskRejectionReason
 from pa_agent.trading.domain.risk import RiskAssessment, RiskPolicy
 from pa_agent.trading.persistence.sqlite_connection import LedgerStorageError
@@ -44,11 +45,14 @@ class ProposalService:
         self._redactor = redactor or output_redactor()
 
     def propose(
-        self, snapshot: SourceAnalysisSnapshot, target: ExecutionTarget
+        self,
+        snapshot: SourceAnalysisSnapshot,
+        target: ExecutionTarget,
+        context: ProductContext | None = None,
     ) -> CandidateExecutionIntent | None:
         """Convert and persist a candidate or its controlled conversion rejection."""
         try:
-            candidate = self._intent_factory.propose(snapshot, target)
+            candidate = self._intent_factory.propose(snapshot, target, context)
         except ConversionRejection as error:
             self._ledger.record_conversion_rejection(snapshot, target, error.reason)
             return None

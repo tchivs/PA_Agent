@@ -11,19 +11,24 @@ from pa_agent.trading.domain.errors import RiskRejectionReason
 from pa_agent.trading.domain.models import (
     AccountObservation,
     GatewayCapabilities,
+    IsolatedMarginOrderContext,
     QuoteObservation,
     RuleObservation,
     TimeObservation,
+    UsdtPerpetualOrderContext,
+    product_context_digest,
 )
 from pa_agent.trading.domain.risk import (
     EvidenceBundle,
     FeeRateObservation,
+    IsolatedMarginProductEvidence,
     LossDrawdownObservation,
     OpenOrderObservation,
     OrderRateObservation,
     RiskAssessment,
     RiskPolicy,
     TargetConnectionObservation,
+    UsdtPerpetualProductEvidence,
 )
 from pa_agent.trading.ports.gateway import TradingGateway
 
@@ -75,6 +80,8 @@ class FreshEvidenceCollector:
             order_rate=observations["order_rate"],
             loss_drawdown=observations["loss_drawdown"],
             fee_rate=observations["fee_rate"],
+            product_context_digest=product_context_digest(candidate.context),
+            product_evidence=observations.get("product_evidence"),
         )
 
     def assess(
@@ -117,6 +124,25 @@ class FreshEvidenceCollector:
             ("loss_drawdown", lambda: self._gateway.get_loss_drawdown(target), RiskRejectionReason.EVIDENCE_UNAVAILABLE),
             ("fee_rate", lambda: self._gateway.get_fee_rate(target, candidate.symbol, candidate.symbol), RiskRejectionReason.FEE_EVIDENCE_MISSING),
         )
+        product_call: tuple[str, Callable[[], object], RiskRejectionReason] | None = None
+        if type(candidate.context) is IsolatedMarginOrderContext:
+            product_call = (
+                "product_evidence",
+                lambda: self._gateway.get_isolated_margin_product_evidence(
+                    target, candidate.context.isolated_symbol
+                ),
+                RiskRejectionReason.EVIDENCE_UNAVAILABLE,
+            )
+        elif type(candidate.context) is UsdtPerpetualOrderContext:
+            product_call = (
+                "product_evidence",
+                lambda: self._gateway.get_usdt_perpetual_product_evidence(
+                    target, candidate.context.symbol or candidate.symbol
+                ),
+                RiskRejectionReason.EVIDENCE_UNAVAILABLE,
+            )
+        if product_call is not None:
+            calls += (product_call,)
         observations: dict[str, object] = {}
         reasons: list[RiskRejectionReason] = []
         for name, operation, unavailable_reason in calls:
@@ -146,6 +172,10 @@ class FreshEvidenceCollector:
             "loss_drawdown": LossDrawdownObservation,
             "fee_rate": FeeRateObservation,
         }
+        if type(candidate.context) is IsolatedMarginOrderContext:
+            required_types["product_evidence"] = IsolatedMarginProductEvidence
+        elif type(candidate.context) is UsdtPerpetualOrderContext:
+            required_types["product_evidence"] = UsdtPerpetualProductEvidence
         reasons = [
             RiskRejectionReason.FEE_EVIDENCE_MISSING
             if name == "fee_rate"
@@ -175,6 +205,7 @@ class FreshEvidenceCollector:
         assert isinstance(order_rate, OrderRateObservation)
         assert isinstance(loss_drawdown, LossDrawdownObservation)
         assert isinstance(fee_rate, FeeRateObservation)
+        product_evidence = observations.get("product_evidence")
         if target.product not in capabilities.products:
             reasons.append(RiskRejectionReason.EVIDENCE_CAPABILITY_MISMATCH)
         if rules.rules.symbol != candidate.symbol or quote.symbol != candidate.symbol:
@@ -214,6 +245,32 @@ class FreshEvidenceCollector:
             reasons.append(RiskRejectionReason.EVIDENCE_FUTURE)
         elif now - fee_rate.observed_at > timedelta(seconds=policy.evidence_max_age_seconds):
             reasons.append(RiskRejectionReason.FEE_EVIDENCE_STALE)
+        if type(candidate.context) is IsolatedMarginOrderContext:
+            if type(product_evidence) is not IsolatedMarginProductEvidence:
+                reasons.append(RiskRejectionReason.EVIDENCE_UNAVAILABLE)
+            else:
+                if product_evidence.target != target:
+                    reasons.append(RiskRejectionReason.EVIDENCE_TARGET_MISMATCH)
+                if product_evidence.isolated_symbol != candidate.context.isolated_symbol:
+                    reasons.append(RiskRejectionReason.EVIDENCE_SYMBOL_MISMATCH)
+                reasons.extend(
+                    self._freshness_reasons(
+                        product_evidence.observed_at, now, policy.evidence_max_age_seconds
+                    )
+                )
+        elif type(candidate.context) is UsdtPerpetualOrderContext:
+            if type(product_evidence) is not UsdtPerpetualProductEvidence:
+                reasons.append(RiskRejectionReason.EVIDENCE_UNAVAILABLE)
+            else:
+                if product_evidence.target != target:
+                    reasons.append(RiskRejectionReason.EVIDENCE_TARGET_MISMATCH)
+                if product_evidence.symbol != (candidate.context.symbol or candidate.symbol):
+                    reasons.append(RiskRejectionReason.EVIDENCE_SYMBOL_MISMATCH)
+                reasons.extend(
+                    self._freshness_reasons(
+                        product_evidence.observed_at, now, policy.evidence_max_age_seconds
+                    )
+                )
         return reasons
 
     @staticmethod

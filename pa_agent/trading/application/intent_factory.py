@@ -12,7 +12,16 @@ from pa_agent.trading.domain.approval import (
     digest_analysis_recommendation,
 )
 from pa_agent.trading.domain.errors import ConversionRejection, ConversionRejectionReason
-from pa_agent.trading.domain.models import Mode, OrderType, ProductType, Side
+from pa_agent.trading.domain.models import (
+    Mode,
+    IsolatedMarginOrderContext,
+    OrderType,
+    ProductContext,
+    ProductType,
+    Side,
+    SpotOrderContext,
+    UsdtPerpetualOrderContext,
+)
 
 
 class IntentFactory:
@@ -24,9 +33,12 @@ class IntentFactory:
         self._utc_now = utc_now or (lambda: datetime.now(UTC))
 
     def propose(
-        self, snapshot: SourceAnalysisSnapshot, target: ExecutionTarget
+        self,
+        snapshot: SourceAnalysisSnapshot,
+        target: ExecutionTarget,
+        context: ProductContext | None = None,
     ) -> CandidateExecutionIntent:
-        """Return a Paper Spot candidate or a stable typed conversion rejection."""
+        """Return a Paper candidate with its immutable product context bound at conversion."""
         if type(snapshot) is not SourceAnalysisSnapshot:
             raise ConversionRejection(ConversionRejectionReason.INVALID_SNAPSHOT_TYPE)
         if type(target) is not ExecutionTarget:
@@ -35,6 +47,7 @@ class IntentFactory:
         self._validate_target(target)
         recommendation = snapshot.recommendation
         self._validate_recommendation(recommendation)
+        context = self._validated_context(target, context)
         return CandidateExecutionIntent(
             source_id=snapshot.source_id,
             source_completed_at=snapshot.completed_at,
@@ -48,6 +61,7 @@ class IntentFactory:
             quantity=recommendation.quantity,
             price=recommendation.price,
             risk_basis=recommendation.risk_basis,
+            context=context,
         )
 
     def _validate_snapshot(self, snapshot: SourceAnalysisSnapshot) -> None:
@@ -75,9 +89,27 @@ class IntentFactory:
             not target.target_id
             or not target.account_id
             or target.mode is not Mode.PAPER
-            or target.product is not ProductType.SPOT
+            or target.product not in ProductType
         ):
             raise ConversionRejection(ConversionRejectionReason.UNSUPPORTED_TARGET)
+
+    @staticmethod
+    def _validated_context(
+        target: ExecutionTarget, context: ProductContext | None
+    ) -> ProductContext:
+        if context is None:
+            if target.product is ProductType.SPOT:
+                return SpotOrderContext()
+            raise ConversionRejection(ConversionRejectionReason.MISSING_PRODUCT_CONTEXT)
+        if type(context) not in (
+            SpotOrderContext,
+            IsolatedMarginOrderContext,
+            UsdtPerpetualOrderContext,
+        ):
+            raise ConversionRejection(ConversionRejectionReason.MISSING_PRODUCT_CONTEXT)
+        if context.product is not target.product:
+            raise ConversionRejection(ConversionRejectionReason.UNSUPPORTED_TARGET)
+        return context
 
     @staticmethod
     def _validate_recommendation(recommendation: AnalysisRecommendation) -> None:

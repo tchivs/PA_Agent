@@ -27,6 +27,7 @@ from pa_agent.trading.domain.models import (
     SpotOrderContext,
     TimeObservation,
     UsdtPerpetualOrderContext,
+    product_context_digest,
 )
 from pa_agent.trading.domain.risk import (
     EvidenceBundle,
@@ -35,6 +36,8 @@ from pa_agent.trading.domain.risk import (
     OpenOrderObservation,
     OrderRateObservation,
     TargetConnectionObservation,
+    IsolatedMarginProductEvidence,
+    UsdtPerpetualProductEvidence,
     select_paper_product_policy,
 )
 
@@ -103,7 +106,17 @@ def _candidate(product: ProductType) -> CandidateExecutionIntent:
     )
 
 
-def _evidence(target: ExecutionTarget) -> EvidenceBundle:
+def _evidence(candidate: CandidateExecutionIntent) -> EvidenceBundle:
+    target = candidate.target
+    product_evidence = None
+    if target.product is ProductType.ISOLATED_MARGIN:
+        product_evidence = IsolatedMarginProductEvidence(
+            target, "BTCUSDT", "100", "80", "20", "0.10", "1.50", "300", True, NOW, 7
+        )
+    elif target.product is ProductType.USDT_PERPETUAL:
+        product_evidence = UsdtPerpetualProductEvidence(
+            target, "BTCUSDT", True, True, "3", "200", "50", "10", "8000", "0.01", NOW, 11
+        )
     return EvidenceBundle(
         capabilities=GatewayCapabilities(frozenset(ProductType), True),
         instrument_rules=InstrumentRules("BTCUSDT", "0.50", "0.001", "0.001", "10"),
@@ -122,6 +135,8 @@ def _evidence(target: ExecutionTarget) -> EvidenceBundle:
         order_rate=OrderRateObservation(target, 0, NOW - timedelta(seconds=60), NOW),
         loss_drawdown=LossDrawdownObservation(target, "0", "0", NOW.replace(hour=0), NOW),
         fee_rate=FeeRateObservation(target, "BTCUSDT", "BTCUSDT", "USDT", "0.001", "fees-v1", NOW),
+        product_context_digest=product_context_digest(candidate.context),
+        product_evidence=product_evidence,
     )
 
 
@@ -155,7 +170,7 @@ def test_reopened_ledger_issues_and_leases_once_for_each_product(execution_datab
         for product in ProductType:
             candidate = _candidate(product)
             policy = select_paper_product_policy(candidate.target, candidate.context)
-            evidence = _evidence(candidate.target)
+            evidence = _evidence(candidate)
             assessment = RiskEngine().assess(candidate, candidate.target, policy, evidence)
             assert assessment.accepted
             ledger.record_candidate(candidate)
@@ -210,7 +225,7 @@ def test_tampered_durable_policy_refuses_lease_before_gateway_authority(
     """A forged policy digest cannot turn a persisted permit into an outbound lease."""
     candidate = _candidate(ProductType.ISOLATED_MARGIN)
     policy = select_paper_product_policy(candidate.target, candidate.context)
-    evidence = _evidence(candidate.target)
+    evidence = _evidence(candidate)
     assessment = RiskEngine().assess(candidate, candidate.target, policy, evidence)
     ledger = SQLiteExecutionLedger(execution_database_path, clock=_Clock())
     try:

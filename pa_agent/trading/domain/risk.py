@@ -43,6 +43,120 @@ def _decimal(instance: object, name: str) -> None:
 
 
 @dataclass(frozen=True)
+class IsolatedMarginProductEvidence:
+    """Fresh immutable isolated-margin facts bound to one Paper pair scope."""
+
+    target: ExecutionTarget
+    isolated_symbol: str
+    collateral: Decimal | str
+    available_collateral: Decimal | str
+    debt_principal: Decimal | str
+    accrued_interest: Decimal | str
+    margin_health: Decimal | str
+    borrow_available: Decimal | str
+    repayment_required: bool
+    observed_at: datetime
+    observation_version: int
+    digest: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.target) is not ExecutionTarget or self.target.product is not ProductType.ISOLATED_MARGIN:
+            raise ValueError("isolated margin evidence requires an isolated-margin target")
+        if not self.isolated_symbol or type(self.repayment_required) is not bool:
+            raise ValueError("isolated margin evidence requires exact scope and repayment status")
+        for name in (
+            "collateral", "available_collateral", "debt_principal", "accrued_interest",
+            "margin_health", "borrow_available",
+        ):
+            _decimal(self, name)
+        if (
+            self.collateral < 0
+            or self.available_collateral < 0
+            or self.debt_principal < 0
+            or self.accrued_interest < 0
+            or self.margin_health <= 0
+            or self.borrow_available < 0
+        ):
+            raise ValueError("isolated margin evidence quantities must be valid")
+        _require_aware(self.observed_at, "observed_at")
+        if type(self.observation_version) is not int or self.observation_version <= 0:
+            raise ValueError("observation_version must be positive")
+        object.__setattr__(self, "digest", _digest(self.to_canonical_dict()))
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        return {
+            "target": self.target,
+            "isolated_symbol": self.isolated_symbol,
+            "collateral": self.collateral,
+            "available_collateral": self.available_collateral,
+            "debt_principal": self.debt_principal,
+            "accrued_interest": self.accrued_interest,
+            "margin_health": self.margin_health,
+            "borrow_available": self.borrow_available,
+            "repayment_required": self.repayment_required,
+            "observed_at": self.observed_at,
+            "observation_version": self.observation_version,
+        }
+
+
+@dataclass(frozen=True)
+class UsdtPerpetualProductEvidence:
+    """Fresh immutable isolated one-way perpetual facts bound to one symbol."""
+
+    target: ExecutionTarget
+    symbol: str
+    isolated_margin_confirmed: bool
+    one_way_position_confirmed: bool
+    maximum_leverage: Decimal | str
+    available_margin: Decimal | str
+    initial_margin: Decimal | str
+    maintenance_margin: Decimal | str
+    mark_price: Decimal | str
+    position_quantity: Decimal | str
+    observed_at: datetime
+    observation_version: int
+    digest: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.target) is not ExecutionTarget or self.target.product is not ProductType.USDT_PERPETUAL:
+            raise ValueError("perpetual evidence requires a perpetual target")
+        if not self.symbol or type(self.isolated_margin_confirmed) is not bool or type(self.one_way_position_confirmed) is not bool:
+            raise ValueError("perpetual evidence requires exact scope and mode confirmations")
+        for name in (
+            "maximum_leverage", "available_margin", "initial_margin", "maintenance_margin",
+            "mark_price", "position_quantity",
+        ):
+            _decimal(self, name)
+        if (
+            self.maximum_leverage <= 0
+            or self.available_margin < 0
+            or self.initial_margin < 0
+            or self.maintenance_margin < 0
+            or self.mark_price <= 0
+        ):
+            raise ValueError("perpetual evidence quantities must be valid")
+        _require_aware(self.observed_at, "observed_at")
+        if type(self.observation_version) is not int or self.observation_version <= 0:
+            raise ValueError("observation_version must be positive")
+        object.__setattr__(self, "digest", _digest(self.to_canonical_dict()))
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        return {
+            "target": self.target,
+            "symbol": self.symbol,
+            "isolated_margin_confirmed": self.isolated_margin_confirmed,
+            "one_way_position_confirmed": self.one_way_position_confirmed,
+            "maximum_leverage": self.maximum_leverage,
+            "available_margin": self.available_margin,
+            "initial_margin": self.initial_margin,
+            "maintenance_margin": self.maintenance_margin,
+            "mark_price": self.mark_price,
+            "position_quantity": self.position_quantity,
+            "observed_at": self.observed_at,
+            "observation_version": self.observation_version,
+        }
+
+@dataclass(frozen=True)
 class IsolatedMarginPolicyLimits:
     """Immutable isolated-pair limits; leverage cannot be reused by another product."""
 
@@ -451,6 +565,8 @@ class EvidenceBundle:
     order_rate: OrderRateObservation
     loss_drawdown: LossDrawdownObservation
     fee_rate: FeeRateObservation
+    product_context_digest: str = ""
+    product_evidence: IsolatedMarginProductEvidence | UsdtPerpetualProductEvidence | None = None
     evidence_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -471,6 +587,8 @@ class EvidenceBundle:
                     "order_rate": self.order_rate,
                     "loss_drawdown": self.loss_drawdown,
                     "fee_rate": self.fee_rate,
+                    "product_context_digest": self.product_context_digest,
+                    "product_evidence": self.product_evidence,
                 }
             ),
         )

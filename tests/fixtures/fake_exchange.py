@@ -4,7 +4,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from threading import Event
 
+from pa_agent.trading.domain.approval import ExecutionTarget
 from pa_agent.trading.domain.models import GatewayEvidence, RuleObservation
+from pa_agent.trading.domain.risk import (
+    IsolatedMarginProductEvidence,
+    UsdtPerpetualProductEvidence,
+)
 from pa_agent.trading.ports.gateway import GatewayUnavailableError
 from pa_agent.trading.ports.ledger import OutboundSubmission
 
@@ -72,6 +77,8 @@ class ScriptedEvidenceGateway:
         order_rates: Sequence[object],
         loss_drawdowns: Sequence[object],
         fee_rates: Sequence[object],
+        isolated_margin_evidence: Sequence[object] = (),
+        perpetual_evidence: Sequence[object] = (),
     ) -> None:
         self._responses = {
             "capabilities": list(capabilities),
@@ -84,9 +91,14 @@ class ScriptedEvidenceGateway:
             "order_rate": list(order_rates),
             "loss_drawdown": list(loss_drawdowns),
             "fee_rate": list(fee_rates),
+            "isolated_margin": list(isolated_margin_evidence),
+            "usdt_perpetual": list(perpetual_evidence),
         }
         self.call_order: list[str] = []
         self.submit_call_count = 0
+        self.product_evidence_call_order: list[str] = []
+        self.isolated_margin_scopes: list[tuple[ExecutionTarget, str]] = []
+        self.perpetual_scopes: list[tuple[ExecutionTarget, str]] = []
 
     def _next(self, name: str) -> object:
         self.call_order.append(name)
@@ -135,6 +147,44 @@ class ScriptedEvidenceGateway:
     def get_fee_rate(self, target: object, symbol: str, quote_identifier: str) -> object:
         del target, symbol, quote_identifier
         return self._next("fee_rate")
+
+    def _next_product(self, name: str) -> object:
+        self.product_evidence_call_order.append(name)
+        responses = self._responses[name]
+        if not responses:
+            raise GatewayUnavailableError(f"no scripted {name} evidence")
+        response = responses.pop(0)
+        if isinstance(response, GatewayUnavailableError):
+            raise response
+        return response
+
+    def get_isolated_margin_product_evidence(
+        self, target: ExecutionTarget, isolated_symbol: str
+    ) -> IsolatedMarginProductEvidence:
+        """Return only one queued exact-scope frozen isolated-margin fact."""
+        self.isolated_margin_scopes.append((target, isolated_symbol))
+        response = self._next_product("isolated_margin")
+        if (
+            type(response) is not IsolatedMarginProductEvidence
+            or response.target != target
+            or response.isolated_symbol != isolated_symbol
+        ):
+            raise GatewayUnavailableError("scripted isolated-margin evidence scope mismatch")
+        return response
+
+    def get_usdt_perpetual_product_evidence(
+        self, target: ExecutionTarget, symbol: str
+    ) -> UsdtPerpetualProductEvidence:
+        """Return only one queued exact-scope frozen perpetual fact."""
+        self.perpetual_scopes.append((target, symbol))
+        response = self._next_product("usdt_perpetual")
+        if (
+            type(response) is not UsdtPerpetualProductEvidence
+            or response.target != target
+            or response.symbol != symbol
+        ):
+            raise GatewayUnavailableError("scripted perpetual evidence scope mismatch")
+        return response
 
     def submit_order(self, *args: object, **kwargs: object) -> GatewayEvidence:
         self.submit_call_count += 1

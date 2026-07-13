@@ -6,11 +6,23 @@ from decimal import Decimal
 
 from pa_agent.trading.domain.approval import CandidateExecutionIntent, ExecutionTarget
 from pa_agent.trading.domain.errors import RiskRejection, RiskRejectionReason
-from pa_agent.trading.domain.models import OrderType, Side, decimal_from_canonical
+from pa_agent.trading.domain.models import (
+    IsolatedMarginOrderContext,
+    OrderType,
+    ProductType,
+    Side,
+    UsdtPerpetualOrderContext,
+    decimal_from_canonical,
+    product_context_digest,
+)
 from pa_agent.trading.domain.risk import (
     EvidenceBundle,
+    IsolatedMarginPolicyLimits,
+    IsolatedMarginProductEvidence,
     RiskAssessment,
     RiskPolicy,
+    UsdtPerpetualPolicyLimits,
+    UsdtPerpetualProductEvidence,
     estimate_fee,
 )
 
@@ -117,6 +129,7 @@ class RiskEngine:
             seconds=policy.evidence_max_age_seconds
         ):
             reasons.append(RiskRejectionReason.FEE_EVIDENCE_STALE)
+        reasons.extend(_product_admission_reasons(candidate, policy, evidence, notional))
         if not reasons:
             fee_estimate = estimate_fee(quantity, price, evidence.fee_rate)
             if candidate.side is Side.BUY:
@@ -181,3 +194,84 @@ def _execution_price(candidate: CandidateExecutionIntent, evidence: EvidenceBund
 def _base_asset_for_symbol(symbol: str) -> str | None:
     """Return the canonical Phase 2 Paper Spot base asset for a supported symbol."""
     return {"BTCUSDT": "BTC"}.get(symbol)
+
+
+def _product_admission_reasons(
+    candidate: CandidateExecutionIntent,
+    policy: RiskPolicy,
+    evidence: EvidenceBundle,
+    notional: Decimal,
+) -> list[RiskRejectionReason]:
+    """Reject non-Spot entries unless their exact fresh product facts prove safety."""
+    if candidate.target.product is ProductType.SPOT:
+        return []
+    if evidence.product_context_digest != product_context_digest(candidate.context):
+        return [RiskRejectionReason.EVIDENCE_TARGET_MISMATCH]
+
+    observed_now = evidence.server_time.server_time
+    product_evidence = evidence.product_evidence
+    if type(candidate.context) is IsolatedMarginOrderContext:
+        if type(policy.product_limits) is not IsolatedMarginPolicyLimits:
+            return [RiskRejectionReason.UNSUPPORTED_TARGET]
+        if type(product_evidence) is not IsolatedMarginProductEvidence:
+            return [RiskRejectionReason.EVIDENCE_UNAVAILABLE]
+        if product_evidence.target != candidate.target:
+            return [RiskRejectionReason.EVIDENCE_TARGET_MISMATCH]
+        if product_evidence.isolated_symbol != candidate.context.isolated_symbol:
+            return [RiskRejectionReason.EVIDENCE_SYMBOL_MISMATCH]
+        freshness = _product_freshness_reasons(product_evidence.observed_at, observed_now, policy)
+        if freshness:
+            return freshness
+        if product_evidence.observation_version <= 0:
+            return [RiskRejectionReason.EVIDENCE_UNAVAILABLE]
+        if (
+            product_evidence.margin_health < policy.product_limits.minimum_margin_health
+            or product_evidence.borrow_available < notional
+            or product_evidence.available_collateral < notional
+            or product_evidence.repayment_required is not candidate.context.auto_repay
+            or product_evidence.collateral <= 0
+            or product_evidence.debt_principal + product_evidence.accrued_interest + notional
+            > product_evidence.collateral * policy.product_limits.maximum_leverage
+        ):
+            return [RiskRejectionReason.INSUFFICIENT_AVAILABLE_BALANCE]
+        return []
+
+    if type(candidate.context) is UsdtPerpetualOrderContext:
+        if type(policy.product_limits) is not UsdtPerpetualPolicyLimits:
+            return [RiskRejectionReason.UNSUPPORTED_TARGET]
+        if type(product_evidence) is not UsdtPerpetualProductEvidence:
+            return [RiskRejectionReason.EVIDENCE_UNAVAILABLE]
+        if product_evidence.target != candidate.target:
+            return [RiskRejectionReason.EVIDENCE_TARGET_MISMATCH]
+        if product_evidence.symbol != candidate.context.symbol:
+            return [RiskRejectionReason.EVIDENCE_SYMBOL_MISMATCH]
+        freshness = _product_freshness_reasons(product_evidence.observed_at, observed_now, policy)
+        if freshness:
+            return freshness
+        if product_evidence.observation_version <= 0:
+            return [RiskRejectionReason.EVIDENCE_UNAVAILABLE]
+        required_initial = notional / candidate.context.leverage
+        required_maintenance = notional * policy.product_limits.minimum_maintenance_margin_ratio
+        if (
+            product_evidence.isolated_margin_confirmed is not True
+            or product_evidence.one_way_position_confirmed is not True
+            or candidate.context.leverage > product_evidence.maximum_leverage
+            or product_evidence.available_margin < product_evidence.initial_margin
+            or product_evidence.initial_margin < required_initial
+            or product_evidence.maintenance_margin < required_maintenance
+            or candidate.context.protective_exit is None
+        ):
+            return [RiskRejectionReason.INSUFFICIENT_AVAILABLE_BALANCE]
+        return []
+
+    return [RiskRejectionReason.UNSUPPORTED_TARGET]
+
+
+def _product_freshness_reasons(
+    observed_at, now, policy: RiskPolicy
+) -> list[RiskRejectionReason]:
+    if observed_at > now:
+        return [RiskRejectionReason.EVIDENCE_FUTURE]
+    if now - observed_at > timedelta(seconds=policy.evidence_max_age_seconds):
+        return [RiskRejectionReason.EVIDENCE_STALE]
+    return []

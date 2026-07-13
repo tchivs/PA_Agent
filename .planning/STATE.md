@@ -3,18 +3,18 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 02
-current_phase_name: approval-and-risk-boundary
-status: executing
-stopped_at: Completed 02-06-PLAN.md
-last_updated: "2026-07-12T13:00:09.805Z"
+status: completed
+stopped_at: Phase 02 complete
+last_updated: "2026-07-12T19:55:27.162Z"
 last_activity: 2026-07-12
-last_activity_desc: Phase 02 execution started
+last_activity_desc: Phase 02 marked complete
 progress:
   total_phases: 7
   completed_phases: 1
-  total_plans: 17
-  completed_plans: 16
+  total_plans: 35
+  completed_plans: 34
   percent: 14
+current_phase_name: approval-and-risk-boundary
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-07-11)
 
 **Core value:** An operator can safely turn a validated analysis recommendation into an explicitly approved, traceable order without coupling strategy logic to a particular exchange.
-**Current focus:** Phase 02 - approval-and-risk-boundary
+**Current focus:** Phase 02 — approval-and-risk-boundary
 
 ## Current Position
 
-Phase: 02 (approval-and-risk-boundary) - EXECUTING
-Plan: 8 of 8
-Status: Ready to execute
-Last activity: 2026-07-12 - Phase 02 execution started
+Phase: 02 — COMPLETE
+Plan: 26 of 26
+Status: Phase 02 complete
+Last activity: 2026-07-12 — Phase 02 marked complete
 
 Progress: [█████████░] 88%
 
@@ -69,6 +69,9 @@ Progress: [█████████░] 88%
 | Phase 02 P08 | 9 min | 2 tasks | 9 files |
 | Phase 02 P07 | 10 min | 2 tasks | 6 files |
 | Phase 02 P06 | 12 min | 2 tasks | 7 files |
+| Phase 02 P10 | 2 min | 2 tasks | 4 files |
+| Phase 02 P11 | 1 min | 2 tasks | 2 files |
+| Phase 02 P12 | 2 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -96,6 +99,11 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 02]: ApprovalService issues and terminates review tickets only; Plan 02-07 retains consumption and outbound authority. — Maintains the protected outbound authorization boundary.
 - [Phase 02]: Current ticket consumption refreshes all evidence and risk before one immediate SQLite transaction records consumed status, the generated client ID, and outbound_started. — Prevents stale approval replay and keeps the gateway boundary limited to ledger-produced outbound authority.
 - [Phase 02]: The SQLite ledger owns a restart-safe READY/LATCHED/RECOVERING latch; cancellation requests remain non-terminal evidence and recovery requires fresh account, open-order, position, and accepted assessment gates.
+- [Phase 02]: phase2-v1 fixes maximum_total_exposure at 1000 USDT in the selected Paper Spot policy digest.
+- [Phase 02]: RiskEngine rejects projected exposure from absolute same-symbol selected-account position notionals plus candidate notional.
+- [Phase 02]: Exposure rejection is proven at both automatic ticket issuance and fresh ticket-consumption boundaries.
+- [Phase 02]: Consumption regression scripts independent issuance and reassessment account positions, so newly over-limit evidence terminates the ticket before outbound authority.
+- [Phase 02]: Proposal assessment reads the ledger-owned READY state before evidence; confirmed accepted-write races become KILL_SWITCH_NOT_READY audit rejections while SQLite permits only rejected facts during a latch.
 
 ### Pending Todos
 
@@ -117,6 +125,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-12T11:45:54.067Z
-Stopped at: Completed 02-06-PLAN.md
+Last session: 2026-07-12T13:45:38.548Z
+Stopped at: Completed 02-12-PLAN.md
 Resume file: None

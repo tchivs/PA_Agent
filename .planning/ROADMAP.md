@@ -83,7 +83,7 @@ This milestone adds a local, operator-controlled execution subsystem without cha
 
 **Likely source areas**: New `pa_agent/trading/application/intent_factory.py`, `risk_engine.py`, `execution_coordinator.py`, `reconciler.py`, `security/`; extend non-secret settings through `pa_agent/config/settings.py`; integrate from `pa_agent/app_context.py` without adding execution behavior to `pa_agent/gui/main_window.py`, `pa_agent/gui/order_opportunity.py`, or `pa_agent/notify/`.
 **Key risks and gates**: The existing Stage 2 payload and alert pipeline must never receive a submission capability. Product context carries leverage, borrow/repay, margin mode, and position mode; leverage is not a generic order field. Fresh exchange evidence is mandatory before submit, and failed evidence rejects rather than using cached values.
-**Plans**: 24/25 plans complete (1 zero-scope replay gap-closure plan pending)
+**Plans**: 26/26 plans complete
 
 Plans:
 **Wave 1**
@@ -125,40 +125,40 @@ Plans:
 
 **Gap Closure Wave 1**
 
-- [ ] 02-14-PLAN.md — Correct MARKET side-price economics and Paper Spot SELL base-balance validation.
-- [ ] 02-15-PLAN.md — Route credential, SQLite audit, logs, notifications, and generated records through unified secret-safe output boundaries, with the execution summary enumerating every real producer and its end-to-end scan result.
+- [x] 02-14-PLAN.md — Correct MARKET side-price economics and Paper Spot SELL base-balance validation.
+- [x] 02-15-PLAN.md — Route credential, SQLite audit, logs, notifications, and generated records through unified secret-safe output boundaries, with the execution summary enumerating every real producer and its end-to-end scan result.
 
 **Gap Closure Wave 2** *(blocked on 02-14)*
 
-- [ ] 02-16-PLAN.md — Allow only fixed-window T0-to-T0+1 authorization-equivalent refreshes while preserving every D-10 binding.
+- [x] 02-16-PLAN.md — Allow only fixed-window T0-to-T0+1 authorization-equivalent refreshes while preserving every D-10 binding.
 
 **Gap Closure Wave 3** *(blocked on 02-16)*
 
-- [ ] 02-17-PLAN.md — Prepare the two-stage opaque dispatch-permit and ledger-lease contract without runtime blocking claims.
+- [x] 02-17-PLAN.md — Prepare the two-stage opaque dispatch-permit and ledger-lease contract without runtime blocking claims.
 
 **Gap Closure Wave 4** *(blocked on 02-17)*
 
-- [ ] 02-18-PLAN.md — Persist, atomically lease, and enforce one-time outbound verification; directly reject caller-created legacy OutboundSubmission values with zero mutation and zero-call regressions.
+- [x] 02-18-PLAN.md — Persist, atomically lease, and enforce one-time outbound verification; directly reject caller-created legacy OutboundSubmission values with zero mutation and zero-call regressions.
 
 **Gap Closure Wave 5** *(blocked on 02-18)*
 
-- [ ] 02-19-PLAN.md — Replace Boolean recovery with dedicated scope-bound recovery assessments whose IDs are allocated only after same-transaction durable-scope identity, target, policy, and digest verification.
+- [x] 02-19-PLAN.md — Replace Boolean recovery with dedicated scope-bound recovery assessments whose IDs are allocated only after same-transaction durable-scope identity, target, policy, and digest verification.
 
 **Verification Gap Closure Wave 2** *(blocked on 02-15)*
 
-- [ ] 02-20-PLAN.md — Sanitize unknown structured logging arguments and exceptions before interpolation, then prove the real file-handler output is secret-safe.
+- [x] 02-20-PLAN.md — Sanitize unknown structured logging arguments and exceptions before interpolation, then prove the real file-handler output is secret-safe.
 
 **Verification Gap Closure Wave 6** *(blocked on 02-19)*
 
-- [ ] 02-21-PLAN.md — Restrict recovery assessment persistence to complete fresh service-collected observations so fabricated empty assessments cannot obtain IDs or transition the latch.
+- [x] 02-21-PLAN.md — Restrict recovery assessment persistence to complete fresh service-collected observations so fabricated empty assessments cannot obtain IDs or transition the latch.
 
 **Verification Gap Closure Wave 7** *(blocked on 02-21)*
 
-- [ ] 02-22-PLAN.md — Revalidate every canonical recovery observation inside the callable SQLite recorder so forged nonempty JSON cannot mint a clearance ID or reset the latch.
+- [x] 02-22-PLAN.md — Revalidate every canonical recovery observation inside the callable SQLite recorder so forged nonempty JSON cannot mint a clearance ID or reset the latch.
 
 **Final Review Gap Closure Wave 8** *(blocked on 02-22)*
 
-- [ ] 02-23-PLAN.md — Remove the legacy public admission/begin authority path and prove only a SQLite-verified permit lease can reach the gateway.
+- [x] 02-23-PLAN.md — Remove the legacy public admission/begin authority path and prove only a SQLite-verified permit lease can reach the gateway.
 
 **Final Review Gap Closure Wave 9** *(blocked on 02-23)*
 
@@ -166,7 +166,11 @@ Plans:
 
 **Verification Gap Closure Wave 10** *(blocked on 02-24)*
 
-- [ ] 02-25-PLAN.md — Bind zero-scope complete to a persisted one-time transition challenge so begin proofs cannot be replayed after restart.
+- [x] 02-25-PLAN.md — Bind zero-scope complete to a persisted one-time transition challenge so begin proofs cannot be replayed after restart.
+
+**Final Review Gap Closure Wave 11** *(blocked on 02-25)*
+
+- [x] 02-26-PLAN.md — Remove caller-constructed zero-scope proof authority and require ledger-controlled gateway evidence before recovery can reach READY.
 
 ### Phase 3: Paper Product Core
 
@@ -285,7 +289,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Execution Foundation | 8/8 | Complete | 2026-07-11 |
-| 2. Approval And Risk Boundary | 13/21 | Gap closure planned | - |
+| 2. Approval And Risk Boundary | 26/26 | Complete   | 2026-07-12 |
 | 3. Paper Product Core | 0/TBD | Not started | - |
 | 4. Local Trading Workspace | 0/TBD | Not started | - |
 | 5. Binance Spot Testnet | 0/TBD | Not started | - |

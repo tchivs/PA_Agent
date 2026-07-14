@@ -133,7 +133,7 @@ created: 2026-07-14
 5. 每个字段在编辑后显示本地格式/必填提示；最终可用性只能由后台 façade 返回的 section-keyed validation/readiness projection 确定。UI 不能自行宣告风险、能力或审批合格。
 6. 底部固定操作栏只有一个主操作：**“保存并验证”**。只有 Pydantic-validated、non-secret settings 和服务验证通过后，草稿才替换“当前已应用配置”。保存失败时已应用快照保持不变。
 7. credential 仅能以不透明引用的“已配置/未配置”状态展示；不呈现、复制、存储或回显秘密、签名、header、原始 endpoint secret 或原始 gateway exception。
-8. “风险限额”默认显示服务返回的基线与本次草稿的受控值；只有 application 层证明“只收紧、不放宽”时才可编辑。没有该 typed API 时值必须只读并标为 **“由既有安全策略管理”**。
+8. “风险限额”显示服务返回的基线与本次草稿的受控值。typed application policy contract 只接受逐字段等于或严于基线的值，并在持久化/readiness 之前拒绝每个放宽值；UI 只渲染该契约返回的设置与验证结果，绝不决定风险或审批。
 
 ### 集中 readiness
 
@@ -239,7 +239,7 @@ created: 2026-07-14
 
 ## UI Considerations
 
-Applicable state considerations resolved: **22 covered，0 backstop，0 unresolved**。
+Applicable state considerations resolved: **24 covered，0 backstop，0 unresolved**。
 
 | 类别 | 元素 | 状态 | 解决方式 |
 |---|---|---|---|
@@ -256,6 +256,7 @@ Applicable state considerations resolved: **22 covered，0 backstop，0 unresolv
 | error | 配置字段与中央 readiness | ✅ covered | 字段显示局部错误，中央摘要列出所属分区、阻断等级、原因和跳转目标。 |
 | partial | 渐进配置 | ✅ covered | 未选 mode/target/product/account 时只显示前置分区和下一步提示，后续分区不显示、不保存。 |
 | long-text | 场所、账户、symbol mapping、风险原因 | ✅ covered | combo/label 省略 + tooltip，错误区换行；不截断实际应用 target digest。 |
+| overflow | 配置值、目标摘要、分区错误 | ✅ covered | 长配置值使用省略号及完整 tooltip，或在错误区域换行；实际 target digest 永不截断。 |
 | empty | 审批记录与票据 | ✅ covered | 显示“暂无可复核的审批单”及严格记录适配要求，禁用创建/批准操作。 |
 | loading | 创建、拒绝、批准票据 | ✅ covered | 对应按钮 busy/禁用，ticket 只读字段保留；后台结果返回前不声明状态变化。 |
 | error | 审批命令 | ✅ covered | 显示安全错误或重新读取的持久化 ticket 状态；不假定成功或终态。 |

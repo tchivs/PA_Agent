@@ -318,22 +318,20 @@ The UI must never replace the final two lines with `gateway.submit_order(...)`; 
 |---|-------|---------|---------------|
 | — | All claims in this research were verified from current repository files, the active virtual environment, or cited official documentation. | — | None — no implementation decision is based only on training data. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Resolved — how are eligible persisted analysis records represented?**
    - **Decision:** Extend `AnalysisRecord` only. `AnalysisRecord.execution_snapshot: ExecutionSafeAnalysisSnapshotV1` is the single durable execution-safe representation; no sidecar or alternative representation is permitted.
    - **Schema/writer contract:** `ExecutionSafeAnalysisSnapshotV1` stores stable `source_id`, `schema_version`, `binding_digest`, `repaired`, and canonical fixed-point-to-`Decimal` recommendation and risk-basis fields. `PendingWriter.save_full` writes the complete typed `AnalysisRecord` extension.
    - **Reader/compatibility contract:** `AnalysisRecordSnapshotReader` accepts only fully conforming records at the current schema version with matching binding digest, unrepaired/fresh status, supported product, and complete canonical Decimal values. It returns `IneligibleAnalysisRecord` for every legacy, incomplete, malformed, old-version, stale, repaired, digest-mismatched, Decimal-invalid, or unsupported record. This is a fail-closed compatibility rule: no migration, inference, defaulting, or backfill is allowed.[VERIFIED: pa_agent/trading/ports/analysis_records.py:1-14; pa_agent/records/schema.py:26-43; pa_agent/records/pending_writer.py:73-89; pa_agent/trading/application/intent_factory.py:35-134]
 
-2. **How are UI-01 editable risk limits reconciled with fixed Paper policy constants?**
-   - What we know: current policies reject any non-fixed limits, while UI-01 and CONTEXT require risk-limit configuration/readiness.[VERIFIED: pa_agent/trading/domain/risk.py:255-308, 365-449; .planning/REQUIREMENTS.md]
-   - What's unclear: whether an existing approved safety rule permits a strictly-tightening local override.
-   - Recommendation: planner must add a typed application-level “only tighten baseline” policy construction contract with dedicated tests, or make the values read-only and request scope clarification. The widget must never enforce or relax risk itself.[VERIFIED: pa_agent/trading/domain/risk.py:336-362]
+2. **Resolved — editable risk limits use a typed only-tightening policy contract.**
+   - **Decision:** The application exposes a typed risk-policy contract that accepts each configured limit only when it is equal to or stricter than the immutable service baseline. Every relaxation is rejected before persistence/readiness; the UI renders the returned settings and validation result only, and has no risk or approval authority.
+   - **Verification path:** `tests/unit/execution/test_workspace_settings.py` proves equality/tightening acceptance, rejection of every relaxed field, and that widget-facing readiness derives from the application result rather than a UI risk decision.[VERIFIED: pa_agent/trading/domain/risk.py:255-308, 336-362, 365-449]
 
-3. **How should Phase 4 surface all recent fills and product snapshots?**
-   - What we know: existing Paper queries are per-command fills and per-scope snapshots; the generic gateway account snapshot is not sufficient for all product panels.[VERIFIED: pa_agent/trading/gateways/paper/gateway.py:159-220, 416-438; pa_agent/trading/gateways/paper/store.py:554-632]
-   - What's unclear: the precise read-only query DTO/API shape.
-   - Recommendation: add a versioned projection reader near `PaperStore`/application façade and test it against reopened stores; do not expose raw SQL or payload dicts to GUI.[VERIFIED: pa_agent/trading/application/paper_projection.py:41-145]
+3. **Resolved — workspace account state uses `WorkspaceProjectionV1`.**
+   - **Decision:** The application exposes immutable, versioned, read-only `WorkspaceProjectionV1` values scoped to the selected target and product. They carry persisted account, order, fill, reconciliation, and kill-switch facts; the cross-product summary is orientation-only and cannot decide risk or approval.
+   - **Verification path:** `tests/unit/execution/test_workspace_projection.py` proves the immutable product/target-scoped DTO and absence of risk/approval authority; `tests/integration/execution/test_workspace_projection_reopen.py` proves persisted facts remain correct after reopening the Paper/ledger stores.[VERIFIED: pa_agent/trading/application/paper_projection.py:41-145; pa_agent/trading/gateways/paper/store.py:531-632; pa_agent/trading/ports/ledger.py:203-277]
 
 ## Environment Availability
 

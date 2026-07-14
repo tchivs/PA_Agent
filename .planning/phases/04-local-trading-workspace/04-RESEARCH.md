@@ -194,7 +194,7 @@ def _apply_result(result: WorkspaceProjection) -> None:
 
 **When to use:** 合格的持久化分析记录进入 ticket flow 后。
 
-**Required gap closure:** `CompletedAnalysisSnapshotReader` 目前仅是 Protocol；`AnalysisRecord` 也没有 `SourceAnalysisSnapshot` 所需的 stable `source_id`、canonical typed recommendation、decision digest、schema/parser version、repaired 状态。现有 `stage2_decision` 是无 schema `dict`，且现有 fixture 的 `decision` 不含 canonical quantity/risk basis。因此计划必须新增严格 adapter：缺失、过期（现为 60 秒）、repaired、digest 不匹配、缺 Decimal quantity/risk basis 或不支持产品的记录只能返回 controlled ineligible result，绝不能从 chart、CSV、alert、notification 或 UI 默认值补造输入。[VERIFIED: pa_agent/trading/ports/analysis_records.py:1-14; pa_agent/records/schema.py:26-43; pa_agent/trading/application/intent_factory.py:27-134; tests/integration/conftest.py:42-104]
+**Resolved durable-record contract:** Phase 4 extends `AnalysisRecord`—it does not add a sidecar. `AnalysisRecord.execution_snapshot` is a required `ExecutionSafeAnalysisSnapshotV1` for records intended for execution review. It persists a stable `source_id`, the exact current `schema_version`, a `binding_digest`, `repaired` status, and canonical fixed-point-to-`Decimal` recommendation and risk-basis fields. `PendingWriter.save_full` serializes that typed extension with the complete record. `AnalysisRecordSnapshotReader` accepts a record only when every current-schema field is present and valid, the binding digest matches, the record is unrepaired and fresh, and the canonical recommendation/risk values and product are supported; it otherwise returns `IneligibleAnalysisRecord`. Legacy, incomplete, malformed, old-version, digest-mismatched, repaired, stale, or unsupported records receive no migration, inference, defaulting, or backfill and cannot enter proposal/ticket creation.[VERIFIED: pa_agent/trading/ports/analysis_records.py:1-14; pa_agent/records/schema.py:26-43; pa_agent/records/pending_writer.py:73-89; pa_agent/trading/application/intent_factory.py:27-134; tests/integration/conftest.py:42-104]
 
 ### Anti-Patterns to Avoid
 
@@ -320,10 +320,10 @@ The UI must never replace the final two lines with `gateway.submit_order(...)`; 
 
 ## Open Questions
 
-1. **How are eligible persisted analysis records represented without changing the advisory analysis contract?**
-   - What we know: `CompletedAnalysisSnapshotReader` is only a protocol; current `AnalysisRecord` has a loose stage-two dict and no execution snapshot fields.[VERIFIED: pa_agent/trading/ports/analysis_records.py:1-14; pa_agent/records/schema.py:26-43]
-   - What's unclear: whether Phase 4 should add a versioned execution-safe sidecar or extend the persisted analysis record schema for new records.
-   - Recommendation: planner must choose and implement one durable, strict adapter before ticket UI work. It must reject existing incompatible records rather than infer values; this is a Phase 4 prerequisite, not a UI fallback.[VERIFIED: pa_agent/trading/application/intent_factory.py:35-134]
+1. **Resolved — how are eligible persisted analysis records represented?**
+   - **Decision:** Extend `AnalysisRecord` only. `AnalysisRecord.execution_snapshot: ExecutionSafeAnalysisSnapshotV1` is the single durable execution-safe representation; no sidecar or alternative representation is permitted.
+   - **Schema/writer contract:** `ExecutionSafeAnalysisSnapshotV1` stores stable `source_id`, `schema_version`, `binding_digest`, `repaired`, and canonical fixed-point-to-`Decimal` recommendation and risk-basis fields. `PendingWriter.save_full` writes the complete typed `AnalysisRecord` extension.
+   - **Reader/compatibility contract:** `AnalysisRecordSnapshotReader` accepts only fully conforming records at the current schema version with matching binding digest, unrepaired/fresh status, supported product, and complete canonical Decimal values. It returns `IneligibleAnalysisRecord` for every legacy, incomplete, malformed, old-version, stale, repaired, digest-mismatched, Decimal-invalid, or unsupported record. This is a fail-closed compatibility rule: no migration, inference, defaulting, or backfill is allowed.[VERIFIED: pa_agent/trading/ports/analysis_records.py:1-14; pa_agent/records/schema.py:26-43; pa_agent/records/pending_writer.py:73-89; pa_agent/trading/application/intent_factory.py:35-134]
 
 2. **How are UI-01 editable risk limits reconciled with fixed Paper policy constants?**
    - What we know: current policies reject any non-fixed limits, while UI-01 and CONTEXT require risk-limit configuration/readiness.[VERIFIED: pa_agent/trading/domain/risk.py:255-308, 365-449; .planning/REQUIREMENTS.md]
@@ -384,6 +384,7 @@ The UI must never replace the final two lines with `gateway.submit_order(...)`; 
 - [ ] `tests/e2e/execution/test_trading_configuration.py` — 中文控件、Paper default、disabled modes、draft vs applied/readiness。
 - [ ] `tests/e2e/execution/test_trading_workspace.py` — product sections、reconciliation/freshness、kill-switch persisted status。
 - [ ] `tests/e2e/execution/test_trading_workspace_workers.py` — delayed fake、event-loop heartbeat、switch/close stale callback ignore、无 GUI-thread I/O。
+- [ ] `tests/e2e/execution/test_trading_approval.py` — ticket confirmation, “不提交审批单”/Esc no-op, stale result discard, and persisted kill-switch recovery.
 
 ## Security Domain
 

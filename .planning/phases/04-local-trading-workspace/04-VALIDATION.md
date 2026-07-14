@@ -46,6 +46,7 @@ created: 2026-07-14
 | 04-W0-06 | TBD | 0 | UI-01 | T-04-01 | Configuration UI exposes Paper default, disabled targets, draft/applied distinction, and centralized readiness | pytest-qt e2e | `.venv/bin/python -m pytest -q -o addopts='' tests/e2e/execution/test_trading_configuration.py` | ❌ W0 | ⬜ pending |
 | 04-W0-07 | TBD | 0 | UI-02 | T-04-04 | Product sections render independent freshness and persisted kill-switch state from projections | pytest-qt e2e | `.venv/bin/python -m pytest -q -o addopts='' tests/e2e/execution/test_trading_workspace.py` | ❌ W0 | ⬜ pending |
 | 04-W0-08 | TBD | 0 | NFR-01 | T-04-01 / T-04-05 | Delayed workers do not block Qt; switched/closed workspaces ignore stale callbacks | pytest-qt e2e | `.venv/bin/python -m pytest -q -o addopts='' tests/e2e/execution/test_trading_workspace_workers.py` | ❌ W0 | ⬜ pending |
+| 04-W0-09 | 04-03 | 0 | UI-03 | T-04-02 / T-04-04 | Ticket confirmation is explicit; “不提交审批单” and Esc have zero side effect; stale approval/kill results are discarded; persisted kill-switch recovery renders after reopen | pytest-qt e2e | `.venv/bin/python -m pytest -q -o addopts='' tests/e2e/execution/test_trading_approval.py` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -61,6 +62,7 @@ created: 2026-07-14
 - [ ] `tests/e2e/execution/test_trading_configuration.py` — Paper default, disabled modes, draft/applied, readiness.
 - [ ] `tests/e2e/execution/test_trading_workspace.py` — product sections, freshness, persisted kill-switch state.
 - [ ] `tests/e2e/execution/test_trading_workspace_workers.py` — delayed workers, event-loop heartbeat, switch/close stale callback rejection, no GUI-thread I/O.
+- [ ] `tests/e2e/execution/test_trading_approval.py` — UI-03/T-04-02/T-04-04 ticket confirmation, “不提交审批单”/Esc no-op, stale result discard, and persisted kill-switch recovery.
 
 Existing pytest, pytest-qt, and execution test infrastructure cover all framework prerequisites; no package-install Wave 0 task is needed.
 

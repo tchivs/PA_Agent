@@ -100,7 +100,7 @@ class IntentFactory:
         if context is None:
             if target.product is ProductType.SPOT:
                 return SpotOrderContext()
-            raise ConversionRejection(ConversionRejectionReason.MISSING_PRODUCT_CONTEXT)
+            raise ConversionRejection(ConversionRejectionReason.UNSUPPORTED_TARGET)
         if type(context) not in (
             SpotOrderContext,
             IsolatedMarginOrderContext,

@@ -61,9 +61,19 @@ PILL_CYAN_BG = "rgba(45,212,191,0.10)"
 FONT_UI = '"Segoe UI", "Microsoft YaHei UI", sans-serif'
 FONT_MONO = '"JetBrains Mono", "Cascadia Mono", "Consolas", monospace'
 
-# Layout
+# Layout — every shared dimension follows the 4px workspace scale.
 RADIUS = 6
-SPACING = 8
+SPACING_XS = 4
+SPACING_SM = 8
+SPACING_MD = 16
+SPACING_LG = 24
+SPACING_XL = 32
+SPACING_2XL = 48
+SPACING_3XL = 64
+SPACING = SPACING_SM
+INTERACTIVE_MIN_HEIGHT = 32
+TABLE_CELL_PADDING = (4, 8)
+SPLITTER_HANDLE = 4
 
 # ---------------------------------------------------------------------------
 # Legacy aliases (backward-compatible names mapped to the new palette)

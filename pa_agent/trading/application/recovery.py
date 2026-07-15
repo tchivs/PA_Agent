@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pa_agent.trading.domain.models import OrderState
-from pa_agent.trading.ports.gateway import TradingGateway
+from pa_agent.trading.ports.gateway import GatewayOperationObserver, TradingGateway
 from pa_agent.trading.ports.ledger import ExecutionLedger, ReconciliationJob
 
 
@@ -26,9 +26,16 @@ class RecoveryService:
     identity, and does not expose a submission path.
     """
 
-    def __init__(self, *, ledger: ExecutionLedger, gateway: TradingGateway) -> None:
+    def __init__(
+        self,
+        *,
+        ledger: ExecutionLedger,
+        gateway: TradingGateway,
+        operation_observer: GatewayOperationObserver | None = None,
+    ) -> None:
         self._ledger = ledger
         self._gateway = gateway
+        self._operation_observer = operation_observer
 
     def recover_startup(self) -> tuple[RecoveryResult, ...]:
         """Scan persisted unresolved jobs and reconcile each one from canonical evidence."""
@@ -38,15 +45,24 @@ class RecoveryService:
 
     def reconcile_job(self, job: ReconciliationJob) -> RecoveryResult:
         """Inspect one job by its durable client ID and append only legal evidence."""
-        evidence = self._gateway.lookup_order_by_client_id(job.client_order_id)
-        if evidence is None:
+        result = self._gateway.lookup_order_by_client_id(job.client_order_id)
+        if result is None:
             return RecoveryResult(
                 reconciliation_job_id=job.reconciliation_job_id,
                 client_order_id=job.client_order_id,
                 lifecycle_state=job.lifecycle_state,
                 evidence_applied=False,
             )
-        outcome = self._ledger.apply_reconciliation_evidence(job, evidence)
+        if self._operation_observer is not None:
+            self._operation_observer.observe_operation(result)
+        if result.evidence is None:
+            return RecoveryResult(
+                reconciliation_job_id=job.reconciliation_job_id,
+                client_order_id=job.client_order_id,
+                lifecycle_state=job.lifecycle_state,
+                evidence_applied=False,
+            )
+        outcome = self._ledger.apply_reconciliation_evidence(job, result.evidence)
         return RecoveryResult(
             reconciliation_job_id=job.reconciliation_job_id,
             client_order_id=job.client_order_id,

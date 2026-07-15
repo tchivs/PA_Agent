@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
         )
         self.resize(1440, 900)
         self._ctx = ctx
+        self._trading_workspace_panel: QWidget | None = None
         self._worker: _AnalysisWorker | None = None
         self._analysis_worker_id: object | None = None
         self._prep_worker: Any = None
@@ -362,7 +363,12 @@ class MainWindow(QMainWindow):
         _general_action.triggered.connect(self._open_general_settings_dialog)
         menu_bar.addAction(_general_action)
 
-        # 4. 演示模式 — 保留下拉菜单
+        # 4. 交易工作区 — 唯一的交易入口；panel owns its UI-session lifecycle.
+        self._trading_workspace_action = QAction("交易工作区", self)
+        self._trading_workspace_action.triggered.connect(self._open_trading_workspace)
+        menu_bar.addAction(self._trading_workspace_action)
+
+        # 5. 演示模式 — 保留下拉菜单
         demo_menu = menu_bar.addMenu("演示模式")
         self._demo_manual_action = QAction("手动选择记录…", self)
         self._demo_manual_action.triggered.connect(lambda: self._on_demo_menu_action("manual"))
@@ -375,6 +381,30 @@ class MainWindow(QMainWindow):
         self._demo_exit_action.triggered.connect(self._exit_demo_mode)
         self._demo_exit_action.setEnabled(False)
         demo_menu.addAction(self._demo_exit_action)
+
+    def _open_trading_workspace(self) -> None:
+        """Lazily open the single presentation session for local trading work."""
+        from pa_agent.gui.trading_panel import TradingWorkspacePanel
+
+        existing = self._trading_workspace_panel
+        if (
+            existing is not None
+            and _qobject_alive(existing)
+            and not bool(getattr(existing, "ui_is_closed", False))
+        ):
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        facade = getattr(self._ctx, "workspace_facade", None)
+        if facade is None:
+            self._status_bar.showMessage("交易工作区当前不可用；请检查应用初始化状态。")
+            return
+        panel = TradingWorkspacePanel(facade=facade, parent=self)
+        panel.setWindowFlag(Qt.WindowType.Window, True)
+        panel.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self._trading_workspace_panel = panel
+        panel.show()
 
     def _build_workbench(self) -> QWidget:
         """Build chart + AI sidebar workbench."""
@@ -4007,6 +4037,11 @@ class MainWindow(QMainWindow):
             self._cancel_analysis_worker()
             self._cancel_snapshot_fetch_worker()
             self._stop_refresh_loop()
+            workspace = self._trading_workspace_panel
+            if workspace is not None and _qobject_alive(workspace):
+                shutdown = getattr(workspace, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
         except RuntimeError as exc:
             logger.debug("Shutdown cleanup skipped: %s", exc)
         super().closeEvent(event)

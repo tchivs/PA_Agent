@@ -439,6 +439,101 @@ def _add_product_policy_binding_columns(connection: sqlite3.Connection) -> None:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN policy_digest_bound TEXT")
 
 
+
+def _add_product_recovery_scope_columns(connection: sqlite3.Connection) -> None:
+    """Persist exact product scope identities without rewriting Phase 2 Spot rows."""
+    connection.execute("ALTER TABLE recovery_scopes ADD COLUMN product_context_json TEXT")
+    connection.execute("ALTER TABLE recovery_scopes ADD COLUMN product_scope_key TEXT")
+    connection.execute("ALTER TABLE recovery_scopes ADD COLUMN policy_id TEXT")
+    connection.execute(
+        "ALTER TABLE recovery_scopes ADD COLUMN legacy_spot_scope INTEGER NOT NULL DEFAULT 1 "
+        "CHECK(legacy_spot_scope IN (0, 1))"
+    )
+    connection.execute("ALTER TABLE recovery_assessments ADD COLUMN policy_id TEXT")
+
+
+def _create_product_scope_recovery_transition_schema(connection: sqlite3.Connection) -> None:
+    """Bind each nonzero READY completion to one later exact-scope assessment."""
+    connection.execute(
+        """
+        CREATE TABLE product_scope_recovery_transitions (
+            persistent_scope_id TEXT PRIMARY KEY REFERENCES recovery_scopes(persistent_scope_id),
+            begin_recovery_assessment_id TEXT NOT NULL UNIQUE
+                REFERENCES recovery_assessments(recovery_assessment_id),
+            begin_evidence_digest TEXT NOT NULL,
+            began_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'consumed')),
+            completion_recovery_assessment_id TEXT UNIQUE
+                REFERENCES recovery_assessments(recovery_assessment_id),
+            consumed_at_utc TEXT,
+            CHECK(
+                (status = 'pending' AND completion_recovery_assessment_id IS NULL AND consumed_at_utc IS NULL)
+                OR (status = 'consumed' AND completion_recovery_assessment_id IS NOT NULL AND consumed_at_utc IS NOT NULL)
+            )
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX product_scope_recovery_transitions_pending_idx "
+        "ON product_scope_recovery_transitions(status, persistent_scope_id)"
+    )
+
+
+def _create_paper_audit_projection_schema(connection: sqlite3.Connection) -> None:
+    """Append-only central audit tables for facts owned by an independent Paper store."""
+    statements = (
+        """
+        CREATE TABLE paper_projection_cursors (
+            account_id TEXT NOT NULL,
+            product TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            paper_event_sequence INTEGER NOT NULL CHECK(paper_event_sequence > 0),
+            PRIMARY KEY(account_id, product, scope)
+        )
+        """,
+        """
+        CREATE TABLE paper_projection_evidence (
+            operation_id TEXT NOT NULL,
+            paper_event_sequence INTEGER NOT NULL CHECK(paper_event_sequence > 0),
+            client_order_id TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            PRIMARY KEY(operation_id, paper_event_sequence)
+        )
+        """,
+        """
+        CREATE TABLE paper_projection_fills (
+            paper_fill_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            paper_event_sequence INTEGER NOT NULL CHECK(paper_event_sequence > 0),
+            fill_json TEXT NOT NULL,
+            provenance_json TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE paper_projection_snapshots (
+            account_id TEXT NOT NULL,
+            product TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            paper_event_sequence INTEGER NOT NULL CHECK(paper_event_sequence > 0),
+            schema_version TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY(account_id, product, scope, paper_event_sequence)
+        )
+        """,
+        """
+        CREATE TABLE paper_projection_incidents (
+            incident_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            identity_json TEXT NOT NULL,
+            observed_json TEXT NOT NULL,
+            recorded_at_utc TEXT NOT NULL
+        )
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
 MIGRATIONS = (
     Migration(1, _create_initial_schema),
     Migration(2, _create_proposal_audit_schema),
@@ -450,4 +545,7 @@ MIGRATIONS = (
     Migration(8, _create_zero_scope_recovery_transition_schema),
     Migration(9, _add_product_context_contract_columns),
     Migration(10, _add_product_policy_binding_columns),
+    Migration(11, _add_product_recovery_scope_columns),
+    Migration(12, _create_product_scope_recovery_transition_schema),
+    Migration(13, _create_paper_audit_projection_schema),
 )

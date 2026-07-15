@@ -96,7 +96,7 @@ class KillSwitchService:
     def complete_recovery(
         self, actor_label: str, *, assessment_ids: tuple[str, ...] | None = None
     ) -> bool:
-        """Require explicit operator action and independently validated clearance IDs."""
+        """Record a second service-owned exact-scope assessment before READY."""
         scopes = self._ledger.list_kill_switch_recovery_scopes()
         if not scopes:
             if assessment_ids not in (None, ()):
@@ -105,9 +105,19 @@ class KillSwitchService:
                 return self._ledger.complete_kill_switch_recovery(actor_label, assessment_ids=())
             except Exception:
                 return False
-        if assessment_ids is None:
-            return False
+        ids = assessment_ids
+        if ids is None:
+            persisted_ids: list[str] = []
+            try:
+                for scope in scopes:
+                    persisted = self._recovery_assessment_service.assess_and_record(scope)
+                    if persisted is None or persisted.recovery_assessment_id is None:
+                        return False
+                    persisted_ids.append(persisted.recovery_assessment_id)
+            except Exception:
+                return False
+            ids = tuple(persisted_ids)
         try:
-            return self._ledger.complete_kill_switch_recovery(actor_label, assessment_ids=assessment_ids)
+            return self._ledger.complete_kill_switch_recovery(actor_label, assessment_ids=ids)
         except Exception:
             return False

@@ -10,12 +10,14 @@ from hashlib import sha256
 
 from pa_agent.trading.domain.errors import ConversionRejection, ConversionRejectionReason
 from pa_agent.trading.domain.models import (
+    IsolatedMarginOrderContext,
     Mode,
     OrderType,
     ProductContext,
     ProductType,
     Side,
     SpotOrderContext,
+    UsdtPerpetualOrderContext,
     canonicalize,
     decimal_from_canonical,
     product_context_digest,
@@ -256,26 +258,107 @@ class CancellationWork:
 
 @dataclass(frozen=True)
 class RecoveryScope:
-    """An immutable ledger-loaded scope eligible for recovery clearance only."""
+    """One immutable, ledger-loaded Paper product recovery scope."""
 
     persistent_scope_id: str
     target: ExecutionTarget
     target_digest: str
+    product_context: ProductContext
+    product_scope_key: str
+    policy_id: str
     policy_version: str
     policy_digest: str
     scope_digest: str
+
+    @classmethod
+    def from_ledger_values(
+        cls,
+        *,
+        persistent_scope_id: str,
+        target: ExecutionTarget,
+        product_context: ProductContext,
+        product_scope_key: str,
+        policy_id: str,
+        policy_version: str,
+        policy_digest: str,
+    ) -> RecoveryScope:
+        """Bind service inputs into the sole canonical durable scope shape."""
+        target_digest = _canonical_digest(target)
+        scope = cls(
+            persistent_scope_id=persistent_scope_id,
+            target=target,
+            target_digest=target_digest,
+            product_context=product_context,
+            product_scope_key=product_scope_key,
+            policy_id=policy_id,
+            policy_version=policy_version,
+            policy_digest=policy_digest,
+            scope_digest="pending",
+        )
+        return replace(scope, scope_digest=scope._expected_scope_digest())
 
     def __post_init__(self) -> None:
         if not all(
             (
                 self.persistent_scope_id,
                 self.target_digest,
+                self.product_scope_key,
+                self.policy_id,
                 self.policy_version,
                 self.policy_digest,
                 self.scope_digest,
             )
         ):
             raise ValueError("recovery scope requires durable identity and immutable bindings")
+        if type(self.target) is not ExecutionTarget or self.target_digest != _canonical_digest(self.target):
+            raise ValueError("recovery scope target digest is not canonical")
+        self._require_exact_product_key()
+        if self.scope_digest != "pending" and self.scope_digest != self._expected_scope_digest():
+            raise ValueError("recovery scope digest is not canonical")
+
+    def _require_exact_product_key(self) -> None:
+        if self.target.product is ProductType.SPOT:
+            valid = type(self.product_context) is SpotOrderContext
+        elif self.target.product is ProductType.ISOLATED_MARGIN:
+            valid = (
+                type(self.product_context) is IsolatedMarginOrderContext
+                and self.product_context.isolated_symbol == self.product_scope_key
+            )
+        elif self.target.product is ProductType.USDT_PERPETUAL:
+            valid = (
+                type(self.product_context) is UsdtPerpetualOrderContext
+                and self.product_context.symbol == self.product_scope_key
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ValueError("recovery scope product key does not match its context")
+
+    def _expected_scope_digest(self) -> str:
+        return _canonical_digest(
+            {
+                "schema_version": "paper-recovery-scope-v1",
+                "persistent_scope_id": self.persistent_scope_id,
+                "target_digest": self.target_digest,
+                "product_context_digest": product_context_digest(self.product_context),
+                "product_scope_key": self.product_scope_key,
+                "policy_id": self.policy_id,
+                "policy_version": self.policy_version,
+                "policy_digest": self.policy_digest,
+            }
+        )
+
+    def is_canonical(self) -> bool:
+        """Return whether every durable scope binding still has its canonical value."""
+        try:
+            self._require_exact_product_key()
+            return (
+                type(self.target) is ExecutionTarget
+                and self.target_digest == _canonical_digest(self.target)
+                and self.scope_digest == self._expected_scope_digest()
+            )
+        except (TypeError, ValueError):
+            return False
 
 
 @dataclass(frozen=True)
@@ -286,6 +369,7 @@ class RecoveryAssessment:
     persistent_scope_id: str
     scope_digest: str
     target_digest: str
+    policy_id: str
     policy_version: str
     policy_digest: str
     evidence_digest: str
@@ -300,6 +384,7 @@ class RecoveryAssessment:
                 self.persistent_scope_id,
                 self.scope_digest,
                 self.target_digest,
+                self.policy_id,
                 self.policy_version,
                 self.policy_digest,
                 self.evidence_digest,

@@ -7,7 +7,8 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 import json
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from pa_agent.trading.domain.errors import CanonicalInputError, ProductContextError
 from pa_agent.trading.domain.models import ProductType, decimal_from_canonical, decimal_to_canonical
@@ -92,6 +93,8 @@ class MarketObservation:
     observed_at: datetime
     asks: tuple[DepthLevel, ...]
     bids: tuple[DepthLevel, ...]
+    mark_price: Decimal | str | None = None
+    funding_rate: Decimal | str = Decimal("0")
 
     def __post_init__(self) -> None:
         for field_name in ("observation_id", "account_id", "symbol"):
@@ -110,6 +113,11 @@ class MarketObservation:
             expected = tuple(sorted(prices, reverse=reverse))
             if prices != expected:
                 raise CanonicalInputError(f"{side_name} must use canonical price order")
+        if self.mark_price is not None:
+            _decimal(self, "mark_price")
+            if self.mark_price <= 0:
+                raise CanonicalInputError("mark_price must be positive")
+        _decimal(self, "funding_rate")
 
     @property
     def scope(self) -> tuple[str, ProductType, str]:
@@ -139,17 +147,56 @@ class PaperEconomicPolicy:
     fee_rule_version: str
     slippage_rate: Decimal | str
     slippage_rule_version: str
+    interest_rate: Decimal | str = Decimal("0")
+    interest_rule_version: str = "interest-v1"
+    minimum_margin_health: Decimal | str = Decimal("1.25")
+    maximum_leverage: Decimal | str = Decimal("3")
+    maintenance_margin_rate: Decimal | str = Decimal("0.05")
+    maintenance_rule_version: str = "maintenance-v1"
+    funding_rule_version: str = "funding-v1"
+    liquidation_price_adjustment: Decimal | str = Decimal("0")
+    liquidation_rule_version: str = "liquidation-v1"
+    liquidation_fee_rate: Decimal | str = Decimal("0")
+    liquidation_fee_rule_version: str = "liquidation-fee-v1"
 
     def __post_init__(self) -> None:
         if type(self.product) is not ProductType:
             raise CanonicalInputError("product must be a ProductType instance")
-        for field_name in ("policy_version", "fee_rule_version", "slippage_rule_version"):
+        for field_name in (
+            "policy_version",
+            "fee_rule_version",
+            "slippage_rule_version",
+            "interest_rule_version",
+            "maintenance_rule_version",
+            "funding_rule_version",
+            "liquidation_rule_version",
+            "liquidation_fee_rule_version",
+        ):
             _require_identifier(getattr(self, field_name), field_name)
-        for field_name in ("fee_rate", "slippage_rate"):
+        for field_name in (
+            "fee_rate",
+            "slippage_rate",
+            "interest_rate",
+            "maintenance_margin_rate",
+            "liquidation_price_adjustment",
+            "liquidation_fee_rate",
+        ):
             _decimal(self, field_name)
             _require_nonnegative(self, field_name)
-        if self.slippage_rate >= Decimal("1"):
-            raise CanonicalInputError("slippage_rate must remain below one")
+        _decimal(self, "maximum_leverage")
+        _decimal(self, "minimum_margin_health")
+        if self.maximum_leverage <= 0 or self.minimum_margin_health <= 0:
+            raise CanonicalInputError("paper policy leverage and margin thresholds must be positive")
+        if any(
+            rate >= Decimal("1")
+            for rate in (
+                self.slippage_rate,
+                self.maintenance_margin_rate,
+                self.liquidation_price_adjustment,
+                self.liquidation_fee_rate,
+            )
+        ):
+            raise CanonicalInputError("paper policy rates must remain below one")
 
 
 @dataclass(frozen=True)
@@ -224,6 +271,29 @@ class PaperFillCandidate:
     def to_canonical_dict(self) -> dict[str, Any]:
         """Return all candidate economics in canonical fixed-point form."""
         return _canonicalize(self)
+
+
+@dataclass(frozen=True)
+class PaperLiquidationCandidate:
+    """Immutable forced-close fact that is intentionally separate from an order fill quantity."""
+
+    paper_fill_id: str
+    account_id: str
+    symbol: str
+    origin_command_id: str
+    quantity: Decimal | str
+    provenance: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        for name in ("paper_fill_id", "account_id", "symbol", "origin_command_id"):
+            _require_identifier(getattr(self, name), name)
+        _decimal(self, "quantity")
+        if self.quantity <= 0:
+            raise CanonicalInputError("liquidation quantity must be positive")
+        object.__setattr__(self, "provenance", MappingProxyType(dict(self.provenance)))
+        _canonical_json = json.dumps(dict(self.provenance), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        if not _canonical_json:
+            raise CanonicalInputError("liquidation provenance is required")
 
 
 @dataclass(frozen=True)

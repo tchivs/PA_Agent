@@ -10,7 +10,11 @@ from pa_agent.trading.domain.risk import (
     IsolatedMarginProductEvidence,
     UsdtPerpetualProductEvidence,
 )
-from pa_agent.trading.ports.gateway import GatewayUnavailableError
+from pa_agent.trading.ports.gateway import (
+    GatewayOperationReference,
+    GatewayOperationResult,
+    GatewayUnavailableError,
+)
 from pa_agent.trading.ports.ledger import OutboundSubmission
 
 
@@ -22,16 +26,23 @@ class ReconciliationOnlyGateway:
         self.lookup_client_order_ids: list[str] = []
         self.submit_call_count = 0
 
-    def lookup_order_by_client_id(self, client_order_id: str) -> GatewayEvidence | None:
-        """Record the persisted client ID lookup and return its scripted evidence."""
+    def lookup_order_by_client_id(self, client_order_id: str) -> GatewayOperationResult | None:
+        """Record the persisted client ID lookup and return its scripted immutable result."""
         self.lookup_client_order_ids.append(client_order_id)
-        return self._evidence_by_client_order_id.get(client_order_id)
+        evidence = self._evidence_by_client_order_id.get(client_order_id)
+        return None if evidence is None else GatewayOperationResult(
+            evidence=evidence,
+            reference=GatewayOperationReference(
+                operation_id=f"fake:{evidence.evidence_id}",
+                client_order_id=evidence.client_order_id,
+            ),
+        )
 
     def set_evidence(self, client_order_id: str, evidence: GatewayEvidence | None) -> None:
         """Replace one deterministic lookup response for a later recovery attempt."""
         self._evidence_by_client_order_id[client_order_id] = evidence
 
-    def submit_order(self, *args: object, **kwargs: object) -> GatewayEvidence:
+    def submit_order(self, *args: object, **kwargs: object) -> GatewayOperationResult:
         """Reject every submission because recovery may only obtain evidence."""
         self.submit_call_count += 1
         raise AssertionError("recovery must never submit an order")

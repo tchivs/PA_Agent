@@ -226,7 +226,8 @@ def test_reset_requires_processed_work_fresh_evidence_and_explicit_operator_acti
     assert ledger.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
     assert service.complete_recovery("operator-1", assessment_ids=("forged-assessment-id",)) is False
     assessment_id = _only_recovery_assessment_id(execution_database_path)
-    assert service.complete_recovery("operator-1", assessment_ids=(assessment_id,)) is True
+    clock.now = NOW + timedelta(seconds=1)
+    assert service.complete_recovery("operator-1") is True
     assert ledger.get_kill_switch_state().status is KillSwitchStatus.READY
     ledger.close()
 
@@ -295,7 +296,8 @@ def test_recovery_scope_assessment_ids_are_the_only_path_to_ready(
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
         assert not resumed.complete_recovery("operator-1", assessment_ids=("forged-assessment-id",))
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.RECOVERING
-        assert resumed.complete_recovery("operator-1", assessment_ids=(assessment_id,))
+        clock.now = NOW + timedelta(seconds=1)
+        assert resumed.complete_recovery("operator-1")
         assert reopened.get_kill_switch_state().status is KillSwitchStatus.READY
         assert gateway.submit_call_count == 0
         reopened.close()
@@ -332,6 +334,7 @@ def test_caller_built_empty_assessment_has_no_persistence_path_or_authority(
             persistent_scope_id=scope.persistent_scope_id,
             scope_digest=scope.scope_digest,
             target_digest=scope.target_digest,
+            policy_id=scope.policy_id,
             policy_version=scope.policy_version,
             policy_digest=scope.policy_digest,
             evidence_digest="forged-evidence",
@@ -429,6 +432,7 @@ def _accepted_recovery_assessment(scope: object, evidence_json: str) -> Recovery
         persistent_scope_id=scope.persistent_scope_id,
         scope_digest=scope.scope_digest,
         target_digest=scope.target_digest,
+        policy_id=scope.policy_id,
         policy_version=scope.policy_version,
         policy_digest=scope.policy_digest,
         evidence_digest=sha256(evidence_json.encode("utf-8")).hexdigest(),

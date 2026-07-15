@@ -202,7 +202,19 @@ Plans:
 
 **Likely source areas**: New `pa_agent/trading/qt/`, `pa_agent/gui/trading_panel.py`, related `pa_agent/gui/trading_*` widgets, and integration through `pa_agent/app_context.py` and `pa_agent/gui/main_window.py`; use existing worker practices in `pa_agent/data/refresh_loop.py`, `pa_agent/gui/analysis_prep_worker.py`, and `_AnalysisWorker` in `pa_agent/gui/main_window.py`. Add pytest-qt coverage under `tests/e2e/execution/`.
 **Key risks and gates**: Widgets remain thin projections and do not call gateways or assign lifecycle states. Venue-specific conditionals belong in adapter capability data, not `MainWindow`, `DecisionPanel`, or analysis code.
-**Plans**: TBD
+**Plans**: 10/10 plans executed
+
+- [x] 04-01-PLAN.md
+- [x] 04-02-PLAN.md
+- [x] 04-03-PLAN.md
+- [x] 04-04-PLAN.md
+- [x] 04-05-PLAN.md
+- [x] 04-06-PLAN.md
+- [x] 04-07-PLAN.md
+- [x] 04-08-PLAN.md
+- [x] 04-09-PLAN.md
+- [x] 04-10-PLAN.md
+
 **UI hint**: yes
 
 ### Phase 5: Binance Spot Testnet
@@ -291,7 +303,7 @@ Plans:
 | 1. Execution Foundation | 8/8 | Complete | 2026-07-11 |
 | 2. Approval And Risk Boundary | 26/26 | Complete   | 2026-07-12 |
 | 3. Paper Product Core | 0/TBD | Not started | - |
-| 4. Local Trading Workspace | 0/TBD | Not started | - |
+| 4. Local Trading Workspace | 10/10 | In Progress|  |
 | 5. Binance Spot Testnet | 0/TBD | Not started | - |
 | 6. Margin And Perpetual Expansion | 0/TBD | Not started | - |
 | 7. OKX Readiness And Release Gate | 0/TBD | Not started | - |

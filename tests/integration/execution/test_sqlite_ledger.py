@@ -1,9 +1,10 @@
 """Integration coverage for SQLite ledger storage policy and schema migrations."""
 from __future__ import annotations
-
+from concurrent.futures import ThreadPoolExecutor
 import os
 import sqlite3
 from pathlib import Path
+from threading import Event, Lock
 
 import pytest
 
@@ -12,6 +13,7 @@ from pa_agent.trading.persistence.migrations import Migration, run_migrations
 from pa_agent.trading.persistence.sqlite_connection import (
     LedgerConfigurationError,
     LedgerStorageError,
+    bootstrap_sqlite_connection,
     open_sqlite_connection,
 )
 
@@ -87,3 +89,93 @@ def test_failed_migration_rolls_back_ddl_and_retries_deterministically(tmp_path:
     run_migrations(connection, migrations=(Migration(1, repaired_migration),))
     assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
     connection.close()
+
+
+def test_bootstrap_uses_one_canonical_path_guard_without_global_serialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Equivalent paths serialize bootstrap while another database can initialize."""
+    import pa_agent.trading.persistence.sqlite_connection as sqlite_connection
+
+    database_path = tmp_path / "nested" / "execution_ledger.sqlite3"
+    equivalent_path = database_path.parent / "." / database_path.name
+    unrelated_path = tmp_path / "other" / "execution_ledger.sqlite3"
+    first_path_entered = Event()
+    release_first_path = Event()
+    equivalent_path_configuring = Event()
+    unrelated_path_finished = Event()
+    configure_calls = 0
+    configure_calls_lock = Lock()
+    original_configure = sqlite_connection._configure_connection
+
+    def block_first_path(connection: sqlite3.Connection) -> None:
+        nonlocal configure_calls
+        connection_path = Path(connection.execute("PRAGMA database_list").fetchone()[2]).resolve()
+        if connection_path == database_path.resolve():
+            with configure_calls_lock:
+                configure_calls += 1
+                call_number = configure_calls
+            if call_number == 1:
+                first_path_entered.set()
+                assert release_first_path.wait(timeout=5)
+            else:
+                equivalent_path_configuring.set()
+        original_configure(connection)
+
+    monkeypatch.setattr(sqlite_connection, "_configure_connection", block_first_path)
+
+    def bootstrap(path: Path, finished: Event | None = None) -> None:
+        connection = bootstrap_sqlite_connection(path)
+        connection.close()
+        if finished is not None:
+            finished.set()
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first = executor.submit(bootstrap, database_path)
+        assert first_path_entered.wait(timeout=5)
+        equivalent = executor.submit(bootstrap, equivalent_path.absolute())
+        unrelated = executor.submit(bootstrap, unrelated_path, unrelated_path_finished)
+        assert unrelated_path_finished.wait(timeout=5)
+        assert equivalent_path_configuring.is_set() is False
+        release_first_path.set()
+        first.result()
+        equivalent.result()
+        unrelated.result()
+
+    assert configure_calls == 2
+
+
+def test_bootstrap_migration_failure_rolls_back_and_retries_with_full_policy(tmp_path: Path) -> None:
+    """A failed bootstrap migration closes that connection and leaves a clean retry path."""
+    database_path = tmp_path / "execution_ledger.sqlite3"
+
+    def broken_migration(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE interrupted_schema (id INTEGER PRIMARY KEY)")
+        raise LedgerConfigurationError("injected migration failure")
+
+    with pytest.raises(LedgerConfigurationError, match="injected migration failure"):
+        bootstrap_sqlite_connection(
+            database_path, migrations=(Migration(1, broken_migration),)
+        )
+
+    inspection = open_sqlite_connection(database_path)
+    try:
+        assert inspection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'interrupted_schema'"
+        ).fetchone() is None
+        assert inspection.execute("SELECT version FROM schema_migrations").fetchall() == []
+    finally:
+        inspection.close()
+
+    def repaired_migration(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE interrupted_schema (id INTEGER PRIMARY KEY)")
+
+    connection = bootstrap_sqlite_connection(
+        database_path, migrations=(Migration(1, repaired_migration),)
+    )
+    try:
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert connection.execute("PRAGMA synchronous").fetchone() == (2,)
+    finally:
+        connection.close()

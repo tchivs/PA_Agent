@@ -16,5 +16,143 @@
     "plan": "08",
     "task": "Phase01Plan08Executor",
     "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "03-01",
+    "task": "Phase03Plan01Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "03-03",
+    "task": "Phase03Plan03Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "02",
+    "task": "Phase03Plan02Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "03-13",
+    "task": "Phase03Plan13Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "03-10",
+    "task": "Phase03Plan10Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "09",
+    "task": "Phase03Plan09Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "04",
+    "task": "Phase03Plan04Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "03-11",
+    "task": "Phase03Plan11Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "06",
+    "task": "Phase03Plan06Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "12",
+    "task": "Phase03Plan12Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "14",
+    "task": "Phase03Plan14Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "08",
+    "task": "Phase03Plan08Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 3,
+    "plan": "outbound-boundary-repair",
+    "task": "Phase03OutboundBoundaryFixer",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "01",
+    "task": "Phase04Plan01Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "02",
+    "task": "Phase04Plan02Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "03",
+    "task": "Phase04Plan03Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "04",
+    "task": "Phase04Plan04Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "06",
+    "task": "Phase04Plan06Executor",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "05",
+    "task": "Phase04Plan05Worker",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "07",
+    "task": "Phase04Plan07Worker",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "08",
+    "task": "Phase04Plan08Worker",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "09",
+    "task": "Phase04Plan09Worker",
+    "status": "completed"
+  },
+  {
+    "phase": 4,
+    "plan": "10",
+    "task": "Phase04Plan10Worker",
+    "status": "completed"
   }
 ]

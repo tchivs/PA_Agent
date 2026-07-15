@@ -191,7 +191,31 @@ def _create_product_evidence_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_perpetual_liquidation_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE paper_liquidation_fills (
+            paper_fill_id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            product TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            origin_command_id TEXT NOT NULL REFERENCES paper_orders(command_id),
+            quantity TEXT NOT NULL,
+            provenance_json TEXT NOT NULL,
+            paper_event_sequence INTEGER NOT NULL REFERENCES paper_events(sequence)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX paper_liquidation_fills_scope_idx
+        ON paper_liquidation_fills(account_id, product, symbol, paper_event_sequence)
+        """
+    )
+
+
 PAPER_MIGRATIONS = (
     PaperMigration(version=1, apply=_create_initial_paper_schema),
     PaperMigration(version=2, apply=_create_product_evidence_schema),
+    PaperMigration(version=3, apply=_create_perpetual_liquidation_schema),
 )

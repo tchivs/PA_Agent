@@ -98,6 +98,15 @@ class IsolatedMarginProductEvidence:
             "observation_version": self.observation_version,
         }
 
+    def is_recovery_clear(self, minimum_margin_health: Decimal) -> bool:
+        """Return whether this exact pair has no debt or repayment work remaining."""
+        return (
+            self.debt_principal == 0
+            and self.accrued_interest == 0
+            and not self.repayment_required
+            and self.margin_health >= minimum_margin_health
+        )
+
 
 @dataclass(frozen=True)
 class UsdtPerpetualProductEvidence:
@@ -155,6 +164,17 @@ class UsdtPerpetualProductEvidence:
             "observed_at": self.observed_at,
             "observation_version": self.observation_version,
         }
+
+    def is_recovery_clear(self, maximum_leverage: Decimal) -> bool:
+        """Return whether this exact symbol has no position or held margin remaining."""
+        return (
+            self.isolated_margin_confirmed
+            and self.one_way_position_confirmed
+            and self.position_quantity == 0
+            and self.initial_margin == 0
+            and self.maintenance_margin == 0
+            and self.maximum_leverage <= maximum_leverage
+        )
 
 @dataclass(frozen=True)
 class IsolatedMarginPolicyLimits:

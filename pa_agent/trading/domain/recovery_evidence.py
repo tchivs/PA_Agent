@@ -23,14 +23,19 @@ from pa_agent.trading.domain.models import (
 )
 from pa_agent.trading.domain.risk import (
     FeeRateObservation,
+    IsolatedMarginPolicyLimits,
+    IsolatedMarginProductEvidence,
     LossDrawdownObservation,
     OpenOrderObservation,
     OrderRateObservation,
     TargetConnectionObservation,
+    UsdtPerpetualPolicyLimits,
+    UsdtPerpetualProductEvidence,
+    select_paper_product_policy,
     select_phase2_policy,
 )
 
-_OBSERVATION_TYPES = {
+_BASE_OBSERVATION_TYPES = {
     "capabilities": GatewayCapabilities,
     "rules": RuleObservation,
     "account": AccountObservation,
@@ -44,27 +49,46 @@ _OBSERVATION_TYPES = {
 }
 
 
+def _expected_observation_types(scope: RecoveryScope) -> dict[str, type[object]]:
+    if not scope.is_canonical():
+        raise ValueError("scope_malformed")
+    expected = dict(_BASE_OBSERVATION_TYPES)
+    if scope.target.product is ProductType.ISOLATED_MARGIN:
+        expected["isolated_margin"] = IsolatedMarginProductEvidence
+    elif scope.target.product is ProductType.USDT_PERPETUAL:
+        expected["usdt_perpetual"] = UsdtPerpetualProductEvidence
+    elif scope.target.product is not ProductType.SPOT:
+        raise ValueError("scope_malformed")
+    return expected
+
+
 @dataclass(frozen=True)
 class RecoveryEvidence:
-    """A complete, canonical, scope-bound recovery evidence bundle."""
+    """A complete, immutable, exact-scope recovery evidence bundle."""
 
-    observations: dict[str, object]
+    items: tuple[tuple[str, object], ...]
+
+    @property
+    def observations(self) -> dict[str, object]:
+        """Return a detached view; callers cannot alter the frozen evidence material."""
+        return dict(self.items)
 
     @classmethod
     def from_observations(
         cls, scope: RecoveryScope, observations: dict[str, object], utc_now: datetime
     ) -> RecoveryEvidence:
-        """Validate typed service observations before they become durable evidence."""
+        """Validate only service-collected typed facts before they become durable evidence."""
         _require_aware(utc_now)
-        if type(scope) is not RecoveryScope:
+        if type(scope) is not RecoveryScope or type(observations) is not dict:
             raise ValueError("scope_malformed")
-        if set(observations) != set(_OBSERVATION_TYPES):
-            missing = sorted(set(_OBSERVATION_TYPES) - set(observations))
+        expected = _expected_observation_types(scope)
+        if set(observations) != set(expected):
+            missing = sorted(set(expected) - set(observations))
             raise ValueError(f"{missing[0] if missing else 'evidence'}_unavailable")
-        for name, expected_type in _OBSERVATION_TYPES.items():
+        for name, expected_type in expected.items():
             if type(observations[name]) is not expected_type:
                 raise ValueError(f"{name}_malformed")
-        evidence = cls(dict(observations))
+        evidence = cls(tuple((name, observations[name]) for name in sorted(expected)))
         evidence._validate(scope, utc_now)
         return evidence
 
@@ -76,15 +100,16 @@ class RecoveryEvidence:
         scope: RecoveryScope,
         utc_now: datetime,
     ) -> RecoveryEvidence:
-        """Rebuild and validate untrusted persisted JSON before recovery ID allocation."""
+        """Rebuild and validate persisted JSON before any recovery ID allocation."""
         _require_aware(utc_now)
         if type(evidence_json) is not str or type(evidence_digest) is not str:
             raise ValueError("evidence_malformed")
         try:
             raw = json.loads(evidence_json)
-        except json.JSONDecodeError as exc:
+            expected = _expected_observation_types(scope)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("evidence_malformed") from exc
-        if not isinstance(raw, dict) or set(raw) != set(_OBSERVATION_TYPES):
+        if not isinstance(raw, dict) or set(raw) != set(expected):
             raise ValueError("evidence_malformed")
         try:
             observations = {
@@ -99,6 +124,10 @@ class RecoveryEvidence:
                 "loss_drawdown": _loss_drawdown(raw["loss_drawdown"]),
                 "fee_rate": _fee_rate(raw["fee_rate"]),
             }
+            if scope.target.product is ProductType.ISOLATED_MARGIN:
+                observations["isolated_margin"] = _isolated_margin(raw["isolated_margin"])
+            elif scope.target.product is ProductType.USDT_PERPETUAL:
+                observations["usdt_perpetual"] = _usdt_perpetual(raw["usdt_perpetual"])
             evidence = cls.from_observations(scope, observations, utc_now)
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("evidence_malformed") from exc
@@ -107,18 +136,32 @@ class RecoveryEvidence:
         return evidence
 
     def to_canonical_json(self) -> str:
-        return json.dumps(canonicalize(self.observations), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return json.dumps(
+            canonicalize(self.observations), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
 
     @property
     def digest(self) -> str:
         return sha256(self.to_canonical_json().encode("utf-8")).hexdigest()
 
     def _validate(self, scope: RecoveryScope, utc_now: datetime) -> None:
-        policy = select_phase2_policy(scope.target)
-        if policy.policy_version != scope.policy_version or policy.policy_digest != scope.policy_digest:
+        try:
+            policy = (
+                select_phase2_policy(scope.target)
+                if scope.target.product is ProductType.SPOT
+                and scope.policy_id == "phase2-paper-spot-legacy"
+                else select_paper_product_policy(scope.target, scope.product_context)
+            )
+        except Exception as exc:
+            raise ValueError("policy_mismatch") from exc
+        if (
+            policy.policy_id != scope.policy_id
+            or policy.policy_version != scope.policy_version
+            or policy.policy_digest != scope.policy_digest
+        ):
             raise ValueError("policy_mismatch")
-        symbol = next(iter(sorted(policy.symbols)))
         observations = self.observations
+        key = scope.product_scope_key
         capabilities = observations["capabilities"]
         rules = observations["rules"]
         account = observations["account"]
@@ -130,14 +173,16 @@ class RecoveryEvidence:
         fee_rate = observations["fee_rate"]
         if scope.target.product not in capabilities.products:
             raise ValueError("capabilities_target_mismatch")
-        if rules.rules.symbol != symbol:
+        if rules.rules.symbol != key:
             raise ValueError("rules_symbol_mismatch")
         if account.account_id != scope.target.account_id or account.product is not scope.target.product:
             raise ValueError("account_target_mismatch")
-        if quote.symbol != symbol:
+        if quote.symbol != key:
             raise ValueError("quote_symbol_mismatch")
         if any(position.quantity != 0 for position in account.positions):
             raise ValueError("unresolved_position")
+        if scope.target.product is ProductType.SPOT and any(balance.reserved != 0 for balance in account.balances):
+            raise ValueError("unresolved_reservation")
         for name, observation in (
             ("connection", connection),
             ("open_orders", open_orders),
@@ -151,8 +196,9 @@ class RecoveryEvidence:
             raise ValueError("connection_unavailable")
         if open_orders.count != 0:
             raise ValueError("unresolved_open_orders")
-        if fee_rate.symbol != symbol or fee_rate.quote_identifier != symbol:
+        if fee_rate.symbol != key or fee_rate.quote_identifier != key:
             raise ValueError("fee_rate_target_mismatch")
+        self._validate_product_clearance(scope, policy.product_limits, observations)
         for name, observation in observations.items():
             if name == "capabilities":
                 continue
@@ -160,11 +206,41 @@ class RecoveryEvidence:
             if not _is_fresh(observed_at, utc_now):
                 raise ValueError(f"{name}_stale")
 
+    @staticmethod
+    def _validate_product_clearance(
+        scope: RecoveryScope, product_limits: object, observations: dict[str, object]
+    ) -> None:
+        if scope.target.product is ProductType.SPOT:
+            return
+        if scope.target.product is ProductType.ISOLATED_MARGIN:
+            fact = observations["isolated_margin"]
+            if type(fact) is not IsolatedMarginProductEvidence:
+                raise ValueError("isolated_margin_malformed")
+            if fact.target != scope.target or fact.isolated_symbol != scope.product_scope_key:
+                raise ValueError("isolated_margin_scope_mismatch")
+            if type(product_limits) is not IsolatedMarginPolicyLimits:
+                raise ValueError("isolated_margin_policy_mismatch")
+            if not fact.is_recovery_clear(product_limits.minimum_margin_health):
+                raise ValueError("unresolved_isolated_margin")
+            return
+        fact = observations["usdt_perpetual"]
+        if type(fact) is not UsdtPerpetualProductEvidence:
+            raise ValueError("usdt_perpetual_malformed")
+        if fact.target != scope.target or fact.symbol != scope.product_scope_key:
+            raise ValueError("usdt_perpetual_scope_mismatch")
+        if type(product_limits) is not UsdtPerpetualPolicyLimits:
+            raise ValueError("usdt_perpetual_policy_mismatch")
+        if not fact.is_recovery_clear(product_limits.maximum_leverage):
+            raise ValueError("unresolved_usdt_perpetual")
+
 
 def _mapping(value: object, keys: set[str]) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != keys:
+    if not isinstance(value, dict):
         raise ValueError("malformed canonical object")
-    return value
+    normalized = {key: item for key, item in value.items() if key != "digest"}
+    if set(normalized) != keys:
+        raise ValueError("malformed canonical object")
+    return normalized
 
 
 def _datetime(value: object) -> datetime:
@@ -281,6 +357,63 @@ def _loss_drawdown(value: object) -> LossDrawdownObservation:
 def _fee_rate(value: object) -> FeeRateObservation:
     raw = _mapping(value, {"target", "symbol", "quote_identifier", "fee_currency", "rate", "rate_version", "observed_at"})
     return FeeRateObservation(_target(raw["target"]), _string(raw["symbol"]), _string(raw["quote_identifier"]), _string(raw["fee_currency"]), _decimal(raw["rate"]), _string(raw["rate_version"]), _datetime(raw["observed_at"]))
+
+
+def _isolated_margin(value: object) -> IsolatedMarginProductEvidence:
+    raw = _mapping(
+        value,
+        {
+            "target", "isolated_symbol", "collateral", "available_collateral", "debt_principal",
+            "accrued_interest", "margin_health", "borrow_available", "repayment_required",
+            "observed_at", "observation_version",
+        },
+    )
+    if type(raw["repayment_required"]) is not bool or type(raw["observation_version"]) is not int:
+        raise ValueError("isolated margin evidence malformed")
+    return IsolatedMarginProductEvidence(
+        target=_target(raw["target"]),
+        isolated_symbol=_string(raw["isolated_symbol"]),
+        collateral=_decimal(raw["collateral"]),
+        available_collateral=_decimal(raw["available_collateral"]),
+        debt_principal=_decimal(raw["debt_principal"]),
+        accrued_interest=_decimal(raw["accrued_interest"]),
+        margin_health=_decimal(raw["margin_health"]),
+        borrow_available=_decimal(raw["borrow_available"]),
+        repayment_required=raw["repayment_required"],
+        observed_at=_datetime(raw["observed_at"]),
+        observation_version=raw["observation_version"],
+    )
+
+
+def _usdt_perpetual(value: object) -> UsdtPerpetualProductEvidence:
+    raw = _mapping(
+        value,
+        {
+            "target", "symbol", "isolated_margin_confirmed", "one_way_position_confirmed",
+            "maximum_leverage", "available_margin", "initial_margin", "maintenance_margin",
+            "mark_price", "position_quantity", "observed_at", "observation_version",
+        },
+    )
+    if (
+        type(raw["isolated_margin_confirmed"]) is not bool
+        or type(raw["one_way_position_confirmed"]) is not bool
+        or type(raw["observation_version"]) is not int
+    ):
+        raise ValueError("perpetual evidence malformed")
+    return UsdtPerpetualProductEvidence(
+        target=_target(raw["target"]),
+        symbol=_string(raw["symbol"]),
+        isolated_margin_confirmed=raw["isolated_margin_confirmed"],
+        one_way_position_confirmed=raw["one_way_position_confirmed"],
+        maximum_leverage=_decimal(raw["maximum_leverage"]),
+        available_margin=_decimal(raw["available_margin"]),
+        initial_margin=_decimal(raw["initial_margin"]),
+        maintenance_margin=_decimal(raw["maintenance_margin"]),
+        mark_price=_decimal(raw["mark_price"]),
+        position_quantity=_decimal(raw["position_quantity"]),
+        observed_at=_datetime(raw["observed_at"]),
+        observation_version=raw["observation_version"],
+    )
 
 
 def _is_fresh(observed_at: datetime, now: datetime) -> bool:

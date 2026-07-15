@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from pa_agent.trading.domain.approval import ExecutionTarget
 from pa_agent.trading.domain.errors import TradingDomainError
@@ -39,6 +40,34 @@ class GatewayUnavailableError(TradingGatewayError):
 
 class GatewayAmbiguityError(TradingGatewayError):
     """Raised when a remote command outcome is uncertain and requires reconciliation."""
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayOperationReference:
+    """Opaque durable identity for one gateway operation; it grants read access only."""
+
+    operation_id: str
+    client_order_id: str
+
+    def __post_init__(self) -> None:
+        if not all((type(self.operation_id) is str, self.operation_id, type(self.client_order_id) is str, self.client_order_id)):
+            raise ValueError("gateway operation references require persisted string identities")
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayOperationResult:
+    """Immutable normalized result with an opaque reference to durable gateway facts."""
+
+    evidence: GatewayEvidence | None
+    reference: GatewayOperationReference
+
+
+class GatewayOperationObserver(ABC):
+    """Read-only post-operation sink; implementations receive no execution authority."""
+
+    @abstractmethod
+    def observe_operation(self, result: GatewayOperationResult) -> None:
+        """Observe one immutable gateway result after the producer commits its truth."""
 
 
 class TradingGateway(ABC):
@@ -109,7 +138,7 @@ class TradingGateway(ABC):
         """Return fresh exact-target and exact-symbol perpetual facts only."""
 
     @abstractmethod
-    def submit_order(self, outbound: OutboundSubmission) -> GatewayEvidence:
+    def submit_order(self, outbound: OutboundSubmission) -> GatewayOperationResult:
         """Submit exactly the ledger-created irreversible outbound authorization.
 
         The authorization carries the durable generated client-order ID and its
@@ -119,12 +148,12 @@ class TradingGateway(ABC):
         """
 
     @abstractmethod
-    def cancel_order(self, client_order_id: str) -> GatewayEvidence:
-        """Request cancellation by the durable client-order ID and return evidence."""
+    def cancel_order(self, client_order_id: str) -> GatewayOperationResult:
+        """Request cancellation by durable client ID and return its immutable operation result."""
 
     @abstractmethod
-    def lookup_order_by_client_id(self, client_order_id: str) -> GatewayEvidence | None:
-        """Return normalized order evidence by durable client-order ID when observed."""
+    def lookup_order_by_client_id(self, client_order_id: str) -> GatewayOperationResult | None:
+        """Return immutable normalized order evidence by durable client ID when observed."""
 
     @abstractmethod
     def list_open_orders(

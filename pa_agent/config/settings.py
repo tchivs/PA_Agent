@@ -1,5 +1,7 @@
 """Pydantic settings models for PA Agent."""
 from __future__ import annotations
+from decimal import Decimal
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -156,14 +158,65 @@ class PushPlusSettings(BaseModel):
     token: str = ""
 
 
+class WorkspaceTarget(StrEnum):
+    """Visible trading-workspace targets; only Paper can be persisted as applied."""
+
+    PAPER_SPOT = "paper-spot"
+    BINANCE_TESTNET_SPOT = "binance-testnet-spot"
+    BINANCE_LIVE_SPOT = "binance-live-spot"
+
+
+class WorkspaceCredentialReference(BaseModel):
+    """Opaque credential status metadata, never credential material."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reference_id: str = Field(min_length=1, max_length=256)
+
+
+class WorkspaceRiskLimits(BaseModel):
+    """Locally configurable ceilings that the application compares with its baseline."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    maximum_order_notional: Decimal = Field(gt=0)
+    maximum_total_exposure: Decimal = Field(gt=0)
+    maximum_open_orders: int = Field(ge=1)
+    maximum_utc_day_realized_loss: Decimal = Field(gt=0)
+    maximum_utc_day_drawdown: Decimal = Field(gt=0, le=1)
+
+
+class WorkspaceSettings(BaseModel):
+    """Validated, non-secret settings for the sole supported Paper workspace target."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["paper"] = "paper"
+    target: WorkspaceTarget = WorkspaceTarget.PAPER_SPOT
+    account_id: str = Field(default="paper-spot-primary", min_length=1, max_length=128)
+    product: Literal["spot", "isolated_margin", "usdt_perpetual"] = "spot"
+    symbol_mapping: dict[str, str] = Field(default_factory=dict)
+    paper_balances: dict[str, Decimal] = Field(default_factory=dict)
+    risk_limits: WorkspaceRiskLimits | None = None
+    credential_reference: WorkspaceCredentialReference | None = None
+
+    @field_validator("target")
+    @classmethod
+    def _require_paper_applied_target(cls, value: WorkspaceTarget) -> WorkspaceTarget:
+        if value is not WorkspaceTarget.PAPER_SPOT:
+            raise ValueError("only the Paper target may be persisted as applied settings")
+        return value
+
+
 class TradingSettings(BaseModel):
-    """Persisted Phase 2 execution selection without credential material."""
+    """Persisted execution selection with an opaque Phase 2 reference and Paper workspace state."""
 
     model_config = ConfigDict(extra="forbid")
 
     target: Literal["paper-spot"] = "paper-spot"
     policy_version: Literal["phase2-v1"] = "phase2-v1"
     credential_reference: CredentialReference | None = None
+    workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
 
 
 class Settings(BaseModel):

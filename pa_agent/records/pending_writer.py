@@ -77,7 +77,7 @@ class PendingWriter:
         """
         basename = _build_basename(record)
         path = self._pending_dir / f"{basename}.json"
-        data = record.model_dump()
+        data = record.model_dump(mode="json")
         data = self._sanitize(data, self._api_key)
         self._write_json(path, data)
         try:

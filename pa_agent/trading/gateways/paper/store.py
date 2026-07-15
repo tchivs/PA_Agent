@@ -13,16 +13,26 @@ from typing import Callable, Mapping
 
 from pa_agent.trading.domain.approval import ExecutionTarget
 from pa_agent.trading.domain.models import (
+    Balance,
     ExecutionCommand,
     Mode,
     OrderType,
+    Position,
     ProductType,
     Side,
     decimal_from_canonical,
     decimal_to_canonical,
     product_context_from_canonical_payload,
 )
-from pa_agent.trading.domain.paper import DepthLevel, MarketObservation, PaperFillCandidate
+from pa_agent.trading.gateways.paper.accounting_margin import PaperMarginAccounting
+from pa_agent.trading.gateways.paper.accounting_perpetual import PaperPerpetualAccounting
+from pa_agent.trading.gateways.paper.accounting_spot import PaperSpotAccounting
+from pa_agent.trading.domain.paper import (
+    DepthLevel,
+    MarketObservation,
+    PaperFillCandidate,
+    PaperLiquidationCandidate,
+)
 from pa_agent.trading.domain.risk import (
     IsolatedMarginProductEvidence,
     UsdtPerpetualProductEvidence,
@@ -86,6 +96,38 @@ class PaperFill:
 
 
 @dataclass(frozen=True)
+class PaperWorkspaceFill:
+    """Display-safe immutable fill fact without durable provenance payload leakage."""
+
+    paper_fill_id: str
+    command_id: str
+    quantity: Decimal
+    paper_event_sequence: int
+
+    def __post_init__(self) -> None:
+        if not self.paper_fill_id or not self.command_id or self.paper_event_sequence <= 0:
+            raise ValueError("workspace fills require durable identities and sequence")
+        if self.quantity <= 0:
+            raise ValueError("workspace fills require positive quantity")
+
+
+@dataclass(frozen=True)
+class PaperLiquidationFill:
+    """Durable forced-close provenance separate from the originating order fill."""
+
+    paper_fill_id: str
+    account_id: str
+    symbol: str
+    origin_command_id: str
+    quantity: Decimal
+    provenance: Mapping[str, object]
+    paper_event_sequence: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provenance", MappingProxyType(dict(self.provenance)))
+
+
+@dataclass(frozen=True)
 class PaperEvent:
     sequence: int
     event_type: str
@@ -117,6 +159,40 @@ class PaperProductSnapshot:
         object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
         _canonical_json(dict(self.payload))
 
+
+@dataclass(frozen=True)
+class PaperWorkspaceProductFacts:
+    """Version-checked, immutable durable facts for one Paper account product."""
+
+    account_id: str
+    product: ProductType
+    balances: tuple[Balance, ...]
+    positions: tuple[Position, ...]
+    open_orders: tuple[PaperOrder, ...]
+    fills: tuple[PaperWorkspaceFill, ...]
+    source_sequence: int | None
+    last_successful_reconciled_at: datetime | None
+    source: str = "paper"
+
+    def __post_init__(self) -> None:
+        if not self.account_id or type(self.product) is not ProductType:
+            raise ValueError("workspace facts require an exact account and product")
+        if self.source != "paper":
+            raise ValueError("workspace facts must retain their durable Paper source")
+        if self.source_sequence is not None and (
+            type(self.source_sequence) is not int or self.source_sequence <= 0
+        ):
+            raise ValueError("workspace facts require a positive durable source sequence")
+        if self.last_successful_reconciled_at is not None and self.last_successful_reconciled_at.tzinfo is None:
+            raise ValueError("workspace facts require timezone-aware reconciliation time")
+        if any(type(value) is not Balance for value in self.balances):
+            raise TypeError("workspace balances must be canonical values")
+        if any(type(value) is not Position for value in self.positions):
+            raise TypeError("workspace positions must be canonical values")
+        if any(value.account_id != self.account_id or value.product != self.product.value for value in self.open_orders):
+            raise ValueError("workspace orders must remain product scoped")
+        if any(type(value) is not PaperWorkspaceFill for value in self.fills):
+            raise TypeError("workspace fills must be display-safe durable Paper values")
 
 class PaperStore:
     """Paper-owned SQLite authority with no central-ledger reads or writes."""
@@ -277,6 +353,8 @@ class PaperStore:
         candidate_factory: Callable[[int], tuple[PaperFillCandidate, ...]] | None = None,
         snapshot_factory: Callable[[int, tuple[PaperFillCandidate, ...]], PaperProductSnapshot] | None = None,
         margin_evidence_factory: Callable[[int, tuple[PaperFillCandidate, ...]], IsolatedMarginProductEvidence] | None = None,
+        perpetual_evidence_factory: Callable[[int, tuple[PaperFillCandidate, ...]], UsdtPerpetualProductEvidence] | None = None,
+        liquidation_factory: Callable[[int, tuple[PaperFillCandidate, ...]], PaperLiquidationCandidate | None] | None = None,
         allow_terminal_observation: bool = False,
     ) -> PaperObservationResult:
         """Atomically accept one observation, matching result, and product snapshot."""
@@ -330,8 +408,13 @@ class PaperStore:
             if snapshot is None:
                 raise ValueError("paper observation requires a product snapshot")
             self._assert_snapshot_scope(observation, snapshot)
-
-            
+            liquidation = None if liquidation_factory is None else liquidation_factory(sequence, candidates)
+            if liquidation is not None and (
+                liquidation.account_id != observation.account_id
+                or liquidation.symbol != observation.symbol
+                or observation.product is not ProductType.USDT_PERPETUAL
+            ):
+                raise ValueError("paper liquidation candidate scope is invalid")
             self._append_event(
                 sequence=sequence,
                 event_type="observation_accepted",
@@ -366,10 +449,25 @@ class PaperStore:
                 if candidate.paper_event_sequence != sequence:
                     raise ValueError("paper fill candidate sequence must equal the durable event sequence")
                 self._persist_fill(candidate, sequence)
-            self._persist_snapshot(snapshot, sequence)
+            projection_sequence = sequence
+            if liquidation is not None:
+                projection_sequence = self._allocate_sequence()
+                self._append_event(
+                    sequence=projection_sequence,
+                    event_type="perpetual_liquidation",
+                    client_order_id=None,
+                    command_id=liquidation.origin_command_id,
+                    payload_json=_canonical_json(dict(liquidation.provenance)),
+                )
+                self._persist_liquidation_fill(liquidation, projection_sequence)
+            self._persist_snapshot(snapshot, projection_sequence)
             if margin_evidence_factory is not None:
                 self._persist_isolated_margin_product_evidence(
-                    margin_evidence_factory(sequence, candidates), sequence
+                    margin_evidence_factory(sequence, candidates), projection_sequence
+                )
+            if perpetual_evidence_factory is not None:
+                self._persist_usdt_perpetual_product_evidence(
+                    perpetual_evidence_factory(sequence, candidates), projection_sequence
                 )
         return PaperObservationResult(ObservationDisposition.ACCEPTED, sequence)
 
@@ -496,6 +594,18 @@ class PaperStore:
         ).fetchone()
         return None if row is None else _paper_order_from_row(row)
 
+    def fetch_order_by_command_id(self, command_id: str) -> PaperOrder | None:
+        """Resolve a durable originating order for read-only liquidation evidence delivery."""
+        row = self._connection.execute(
+            """
+            SELECT client_order_id, command_id, account_id, product, symbol, lifecycle_state,
+                   filled_quantity, paper_event_sequence
+            FROM paper_orders WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        return None if row is None else _paper_order_from_row(row)
+
     def list_fills(self, command_id: str) -> tuple[PaperFill, ...]:
         rows = self._connection.execute(
             """
@@ -510,6 +620,31 @@ class PaperStore:
                 command_id=row["command_id"],
                 quantity=decimal_from_canonical(row["quantity"]),
                 provenance_json=row["provenance_json"],
+                paper_event_sequence=row["paper_event_sequence"],
+            )
+            for row in rows
+        )
+
+    def list_liquidation_fills(self, *, account_id: str, symbol: str) -> tuple[PaperLiquidationFill, ...]:
+        """Return durable USDT-perpetual forced closes in their committed event order."""
+        rows = self._connection.execute(
+            """
+            SELECT paper_fill_id, account_id, symbol, origin_command_id, quantity, provenance_json,
+                   paper_event_sequence
+            FROM paper_liquidation_fills
+            WHERE account_id = ? AND product = ? AND symbol = ?
+            ORDER BY paper_event_sequence, paper_fill_id
+            """,
+            (account_id, ProductType.USDT_PERPETUAL.value, symbol),
+        ).fetchall()
+        return tuple(
+            PaperLiquidationFill(
+                paper_fill_id=row["paper_fill_id"],
+                account_id=row["account_id"],
+                symbol=row["symbol"],
+                origin_command_id=row["origin_command_id"],
+                quantity=decimal_from_canonical(row["quantity"]),
+                provenance=json.loads(row["provenance_json"]),
                 paper_event_sequence=row["paper_event_sequence"],
             )
             for row in rows
@@ -550,6 +685,115 @@ class PaperStore:
             payload=payload,
             paper_event_sequence=row["paper_event_sequence"],
         )
+    def read_workspace_product_facts(
+        self, *, account_id: str, product: ProductType
+    ) -> PaperWorkspaceProductFacts:
+        """Rebuild one product's canonical display facts from committed Paper state only."""
+        if not account_id or type(product) is not ProductType:
+            raise ValueError("workspace product reads require an exact account and product")
+        snapshots = self._list_product_snapshots(account_id=account_id, product=product)
+        fact_snapshots = snapshots
+        if product is ProductType.SPOT and snapshots:
+            fact_snapshots = (max(snapshots, key=lambda snapshot: snapshot.paper_event_sequence or 0),)
+        balances: list[Balance] = []
+        positions: list[Position] = []
+        sequences: list[int] = []
+        for snapshot in fact_snapshots:
+            snapshot_balances, snapshot_positions = _workspace_snapshot_facts(snapshot, product)
+            balances.extend(snapshot_balances)
+            positions.extend(snapshot_positions)
+            assert snapshot.paper_event_sequence is not None
+            sequences.append(snapshot.paper_event_sequence)
+        open_orders = self.list_open_orders(account_id=account_id, product=product.value)
+        fills = self._list_product_fills(account_id=account_id, product=product.value)
+        sequences.extend(
+            sequence
+            for sequence in (
+                *(order.paper_event_sequence for order in open_orders),
+                *(fill.paper_event_sequence for fill in fills),
+            )
+            if sequence is not None
+        )
+        source_sequence = max(sequences, default=None)
+        return PaperWorkspaceProductFacts(
+            account_id=account_id,
+            product=product,
+            balances=tuple(balances),
+            positions=tuple(positions),
+            open_orders=open_orders,
+            fills=fills,
+            source_sequence=source_sequence,
+            last_successful_reconciled_at=(
+                None if source_sequence is None else self._event_recorded_at(source_sequence)
+            ),
+        )
+
+    def _list_product_snapshots(
+        self, *, account_id: str, product: ProductType
+    ) -> tuple[PaperProductSnapshot, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT scope, schema_version, payload_json, paper_event_sequence
+            FROM paper_product_snapshots
+            WHERE account_id = ? AND product = ?
+            ORDER BY scope
+            """,
+            (account_id, product.value),
+        ).fetchall()
+        snapshots: list[PaperProductSnapshot] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            if type(payload) is not dict or type(row["paper_event_sequence"]) is not int:
+                raise ValueError("stored paper workspace snapshot is invalid")
+            snapshots.append(
+                PaperProductSnapshot(
+                    account_id=account_id,
+                    product=product.value,
+                    scope=row["scope"],
+                    schema_version=row["schema_version"],
+                    payload=payload,
+                    paper_event_sequence=row["paper_event_sequence"],
+                )
+            )
+        return tuple(snapshots)
+
+    def _list_product_fills(
+        self, *, account_id: str, product: str
+    ) -> tuple[PaperWorkspaceFill, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT fills.paper_fill_id, fills.command_id, fills.quantity, fills.provenance_json,
+                   fills.paper_event_sequence
+            FROM paper_fills AS fills
+            JOIN paper_orders AS orders ON orders.command_id = fills.command_id
+            WHERE orders.account_id = ? AND orders.product = ?
+            ORDER BY fills.paper_event_sequence, fills.paper_fill_id
+            """,
+            (account_id, product),
+        ).fetchall()
+        return tuple(
+            PaperWorkspaceFill(
+                paper_fill_id=row["paper_fill_id"],
+                command_id=row["command_id"],
+                quantity=decimal_from_canonical(row["quantity"]),
+                paper_event_sequence=row["paper_event_sequence"],
+            )
+            for row in rows
+        )
+
+    def _event_recorded_at(self, sequence: int) -> datetime:
+        row = self._connection.execute(
+            "SELECT recorded_at_utc FROM paper_events WHERE sequence = ?", (sequence,)
+        ).fetchone()
+        if row is None or type(row["recorded_at_utc"]) is not str:
+            raise ValueError("workspace fact sequence has no durable event")
+        try:
+            recorded_at = datetime.fromisoformat(row["recorded_at_utc"])
+        except ValueError as exc:
+            raise ValueError("workspace fact event timestamp is invalid") from exc
+        if recorded_at.tzinfo is None:
+            raise ValueError("workspace fact event timestamp must be timezone-aware")
+        return recorded_at
 
     def commit_isolated_margin_product_evidence(
         self, evidence: IsolatedMarginProductEvidence
@@ -659,6 +903,52 @@ class PaperStore:
                 evidence.observed_at.isoformat(),
                 evidence.digest,
                 _canonical_json(_isolated_margin_payload(evidence)),
+                sequence,
+            ),
+        )
+
+    def _persist_usdt_perpetual_product_evidence(
+        self, evidence: UsdtPerpetualProductEvidence, sequence: int
+    ) -> None:
+        """Write a perpetual fact under the same Paper event transaction as its snapshot."""
+        if type(evidence) is not UsdtPerpetualProductEvidence or sequence <= 0:
+            raise TypeError("paper perpetual evidence requires canonical facts and an event sequence")
+        identity = (
+            evidence.target.target_id,
+            evidence.target.account_id,
+            evidence.target.product.value,
+            evidence.symbol,
+            "usdt_perpetual_v1",
+        )
+        latest = self._connection.execute(
+            """
+            SELECT observation_version, evidence_digest
+            FROM paper_product_evidence
+            WHERE target_id = ? AND account_id = ? AND product = ? AND scope = ? AND evidence_type = ?
+            ORDER BY observation_version DESC LIMIT 1
+            """,
+            identity,
+        ).fetchone()
+        if latest is not None:
+            if evidence.observation_version < latest["observation_version"]:
+                raise ValueError("paper product evidence is stale")
+            if evidence.observation_version == latest["observation_version"]:
+                if evidence.digest == latest["evidence_digest"]:
+                    return
+                raise ValueError("paper product evidence version conflicts")
+        self._connection.execute(
+            """
+            INSERT INTO paper_product_evidence(
+                target_id, account_id, product, scope, evidence_type, observation_version,
+                observed_at_utc, evidence_digest, payload_json, paper_event_sequence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                *identity,
+                evidence.observation_version,
+                evidence.observed_at.isoformat(),
+                evidence.digest,
+                _canonical_json(_usdt_perpetual_payload(evidence)),
                 sequence,
             ),
         )
@@ -813,6 +1103,29 @@ class PaperStore:
             WHERE command_id = ?
             """,
             (lifecycle_state, decimal_to_canonical(total), sequence, candidate.command_id),
+        )
+
+    def _persist_liquidation_fill(self, candidate: PaperLiquidationCandidate, sequence: int) -> None:
+        """Persist exact forced-close provenance only after its liquidation event exists."""
+        if sequence <= 0:
+            raise ValueError("paper liquidation requires a durable event sequence")
+        self._connection.execute(
+            """
+            INSERT INTO paper_liquidation_fills(
+                paper_fill_id, account_id, product, symbol, origin_command_id, quantity,
+                provenance_json, paper_event_sequence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                candidate.paper_fill_id,
+                candidate.account_id,
+                ProductType.USDT_PERPETUAL.value,
+                candidate.symbol,
+                candidate.origin_command_id,
+                decimal_to_canonical(candidate.quantity),
+                _canonical_json(dict(candidate.provenance)),
+                sequence,
+            ),
         )
 
     def _order_row(self, client_order_id: str) -> sqlite3.Row:
@@ -970,6 +1283,70 @@ def _require_payload_fields(payload: dict[str, object], fields: frozenset[str]) 
         raise ValueError("stored paper product evidence fields are invalid")
 
 
+def _workspace_snapshot_facts(
+    snapshot: PaperProductSnapshot, product: ProductType
+) -> tuple[tuple[Balance, ...], tuple[Position, ...]]:
+    """Translate a versioned durable snapshot into display-safe canonical values."""
+    if snapshot.product != product.value or snapshot.paper_event_sequence is None:
+        raise ValueError("workspace snapshot product or durable sequence is invalid")
+    if product is ProductType.SPOT:
+        if snapshot.schema_version != "paper-spot-snapshot-v1":
+            raise ValueError("unsupported Paper Spot workspace snapshot version")
+        accounting = PaperSpotAccounting.from_snapshot_payload(snapshot.payload)
+        return (
+            tuple(
+                Balance(asset=asset, total=value.total, available=value.available, reserved=value.reserved)
+                for asset, value in sorted(accounting._balances.items())  # noqa: SLF001 - validated immutable accounting
+            ),
+            (),
+        )
+    if product is ProductType.ISOLATED_MARGIN:
+        if snapshot.schema_version != "paper-isolated-margin-snapshot-v1":
+            raise ValueError("unsupported Paper isolated-margin workspace snapshot version")
+        accounting = PaperMarginAccounting.from_snapshot_payload(snapshot.payload)
+        if accounting.isolated_symbol != snapshot.scope:
+            raise ValueError("Paper isolated-margin workspace snapshot scope is contradictory")
+        return (
+            (
+                Balance(
+                    asset=accounting.borrow_asset,
+                    total=accounting.collateral,
+                    available=accounting.available_collateral,
+                    reserved=accounting.collateral - accounting.available_collateral,
+                ),
+            ),
+            (),
+        )
+    if snapshot.schema_version != "paper-usdt-perpetual-snapshot-v1":
+        raise ValueError("unsupported Paper USDT-perpetual workspace snapshot version")
+    accounting = PaperPerpetualAccounting.from_snapshot_payload(snapshot.payload)
+    if accounting.symbol != snapshot.scope:
+        raise ValueError("Paper USDT-perpetual workspace snapshot scope is contradictory")
+    positions = ()
+    if accounting.quantity != 0:
+        positions = (
+            Position(
+                symbol=accounting.symbol,
+                quantity=accounting.quantity,
+                entry_price=accounting.entry_price,
+                mark_price=accounting.entry_price,
+                unrealized_pnl=accounting.unrealized_pnl,
+                margin=accounting.isolated_margin,
+            ),
+        )
+    return (
+        (
+            Balance(
+                asset="USDT",
+                total=accounting.available_usdt + accounting.isolated_margin,
+                available=accounting.available_usdt,
+                reserved=accounting.isolated_margin,
+            ),
+        ),
+        positions,
+    )
+
+
 def _payload_string(payload: dict[str, object], name: str) -> str:
     value = payload[name]
     if not isinstance(value, str) or not value:
@@ -1085,6 +1462,8 @@ def _observation_from_canonical_json(payload: str) -> MarketObservation:
             observed_at=_payload_datetime(raw, "observed_at"),
             asks=_depth_levels(raw, "asks"),
             bids=_depth_levels(raw, "bids"),
+            mark_price=None if raw.get("mark_price") is None else _payload_decimal(raw, "mark_price"),
+            funding_rate=(Decimal("0") if "funding_rate" not in raw else _payload_decimal(raw, "funding_rate")),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("stored paper observation payload is contradictory") from exc

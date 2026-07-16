@@ -2,15 +2,15 @@
 
 # 启动 GUI
 run:
-	python -m pa_agent.main
+	uv run --frozen pa-agent
 
 # 运行测试
 test:
-	pytest -q
+	uv run --frozen pytest -q
 
 # 代码检查
 lint:
-	ruff check . && black --check .
+	uv run --frozen ruff check . && uv run --frozen black --check .
 
 # 启用 pre-commit，防止 settings / 日志 / 记录被提交
 setup-secrets:

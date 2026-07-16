@@ -5,9 +5,9 @@
 ## Test Framework
 
 **Runner:**
-- Pytest 8+ is the repository test runner, declared in the `dev` extra in `pyproject.toml`.
+- Pytest 8+ is the repository test runner, declared in the `dev` dependency group in `pyproject.toml` and locked by `uv.lock`.
 - Pytest configuration is colocated in `pyproject.toml` under `[tool.pytest.ini_options]`: discovery is rooted at `tests`, and `addopts = "-q"` applies quiet output.
-- `pytest-qt>=4.4` supports Qt GUI tests, and `hypothesis>=6` supports generative/property tests; both are declared in `pyproject.toml`.
+- `pytest-qt>=4.4` supports Qt GUI tests, and `hypothesis>=6` supports generative/property tests; both are synchronized through `uv sync --locked --dev`.
 
 **Assertion Library:**
 - Tests use Python `assert` and pytest helpers. Exception contracts use `pytest.raises(...)`, for example in `tests/integration/execution/test_idempotency_recovery.py` and `tests/unit/execution/test_gateway_contract.py`.
@@ -15,12 +15,12 @@
 
 **Run Commands:**
 ```bash
-pytest -q                                      # Default suite; documented by `make test`
-pytest -q tests/unit                            # Focused deterministic unit tests
-pytest -q tests/integration -m "not live"      # Integration tests without explicitly marked live tests
-pytest -q tests/property                         # Hypothesis/property tests
-pytest -q tests/e2e                              # Qt-driven smoke tests
-make test                                        # Runs `pytest -q` from `Makefile`
+uv run --frozen pytest -q                                      # Default suite; documented by `make test`
+uv run --frozen pytest -q tests/unit                           # Focused deterministic unit tests
+uv run --frozen pytest -q tests/integration -m "not live"     # Integration tests without live tests
+uv run --frozen pytest -q tests/property                       # Hypothesis/property tests
+uv run --frozen pytest -q tests/e2e                            # Qt-driven smoke tests
+make test                                                       # Runs locked pytest through uv
 ```
 
 The marker registry in `pyproject.toml` defines `unit`, `property`, `integration`, `e2e`, and `live`. The recorded default command does **not** exclude `live`; `tests/integration/test_akshare_live.py` is both `live` and `integration`, imports the real AkShare package when installed, and makes network calls. Use the non-live integration command above for deterministic local verification.
@@ -125,7 +125,7 @@ def make_spot_command(**overrides: object) -> ExecutionCommand:
 
 **Requirements:**
 - No coverage configuration, coverage dependency, coverage command, or coverage threshold is present in `pyproject.toml` or `Makefile`.
-- The CI workflow at `.github/workflows/ci.yml` installs `.[dev]` and verifies `import pa_agent`, but it does not invoke pytest, linting, or coverage reporting.
+- The CI workflow at `.github/workflows/ci.yml` synchronizes the locked `dev` dependency group and verifies `import pa_agent` through uv, but it does not invoke pytest, linting, or coverage reporting.
 
 **View Coverage:**
 ```bash

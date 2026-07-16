@@ -26,8 +26,8 @@
 - **macOS/other platforms without MT5** — `MAC版本智能体部署方法.txt` directs users to the TradingView path and notes the Windows-only dependencies are skipped by their markers. [Direct evidence]
 
 **Package Manager:**
-- **pip/setuptools** — `pyproject.toml` uses `setuptools.build_meta` with `setuptools>=68` and `wheel`; installation commands in `README.md` and `.github/workflows/ci.yml` use `pip install -e`. [Direct evidence]
-- **Lockfile: missing** — no Python lockfile (`poetry.lock`, `Pipfile.lock`, `requirements*.txt`) or JavaScript lockfile/package manifest was detected at the repository root; dependency resolution is version-range based through `pyproject.toml`. [Direct evidence]
+- **uv + setuptools** — uv 0.9.30 manages Python 3.11, the project environment, and the committed cross-platform `uv.lock`; setuptools remains the package build backend. [Direct evidence]
+- **Locked resolution** — `uv.lock` fixes direct, transitive, Git, platform-marker, and development dependencies; local and CI commands use `--locked`/`--frozen`. [Direct evidence]
 
 ## Frameworks
 
@@ -51,7 +51,7 @@
 **Build/Dev:**
 - **Ruff >=0.5** — lint tool configured in `pyproject.toml`; the `lint` target in `Makefile` runs `ruff check .`. [Direct evidence]
 - **Black >=24.4** — formatter/checker configured in `pyproject.toml`; the `lint` target in `Makefile` runs `black --check .`. [Direct evidence]
-- **GitHub Actions** — `.github/workflows/ci.yml` runs on pushes and pull requests targeting `main`, installs `.[dev]`, and verifies `import pa_agent`. It does not currently run `pytest`, Ruff, or Black. [Direct evidence]
+- **GitHub Actions** — `.github/workflows/ci.yml` runs on pushes and pull requests targeting `main`, pins uv 0.9.30 and Python 3.11, synchronizes `uv.lock`, and verifies `import pa_agent` through `uv run --frozen`. It does not currently run pytest, Ruff, or Black. [Direct evidence]
 
 ## Key Dependencies
 
@@ -88,15 +88,14 @@
 ## Execution Commands
 
 ```bash
-pip install -e .                 # Install the desktop application
-pip install -e ".[dev]"         # Install application plus test/lint tooling
-python -m pa_agent.main          # Start the PyQt application
-python run.py                    # Alternate launcher with IPython/Spyder handling
-pa-agent                         # Installed console script from pyproject.toml
-make run                         # Equivalent module launcher
-make test                        # pytest -q
-make lint                        # ruff check . && black --check .
-pytest -m "not e2e"              # Contributor-documented focused test selection
+uv sync --locked                # Install the locked desktop application
+uv sync --locked --dev          # Include test/lint dependency group
+uv run --frozen pa-agent        # Start the PyQt application
+uv run --frozen python run.py   # Alternate launcher with IPython/Spyder handling
+make run                        # Equivalent locked uv launcher
+make test                       # uv run --frozen pytest -q
+make lint                       # Locked Ruff and Black checks
+uv run --frozen pytest -m "not e2e"  # Contributor-focused test selection
 ```
 
 The commands above are defined or documented in `pyproject.toml`, `Makefile`, `README.md`, `run.py`, `CONTRIBUTING.md`, and `pa_agent.egg-info/entry_points.txt`. [Direct evidence]

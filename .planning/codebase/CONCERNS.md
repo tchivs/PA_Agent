@@ -16,7 +16,7 @@ The items below are ranked by observed impact. **Verified facts** are directly e
 ### Critical — CI installs the project but does not execute its test suite
 
 - **Files:** `.github/workflows/ci.yml`, `pyproject.toml`, `tests/unit/`, `tests/integration/`, `tests/e2e/`, `tests/property/`
-- **Verified facts:** The sole CI job installs `.[dev]` and runs `python -c "import pa_agent; print('OK')`; it has no `pytest` or other test-execution step. `pyproject.toml` configures pytest with `tests` as the test path, and the repository contains unit, integration, end-to-end, and property test directories.
+- **Verified facts:** The sole CI job uses uv 0.9.30 to sync the locked `dev` dependency group and runs `uv run --frozen python -c "import pa_agent; print('OK')"`; it has no `pytest` or other test-execution step. `pyproject.toml` configures pytest with `tests` as the test path, and the repository contains unit, integration, end-to-end, and property test directories.
 - **Impact:** Pull requests can merge with a broken tested behavior despite the repository already containing a test suite for it.
 - **Fix approach:** Add focused CI jobs that run the existing pytest suite on the supported Python version, with a separate opt-in job or marker exclusion for tests requiring live credentials. Make the test job required before merge.
 

@@ -346,7 +346,7 @@ def send_order_signal(
         import requests  # type: ignore[import]
     except ImportError:
         logger.warning(
-            "飞书通知：requests 库未安装，请运行 pip install requests"
+            "飞书通知：requests 库未安装，请在项目目录运行 uv sync --locked"
         )
         return False
 

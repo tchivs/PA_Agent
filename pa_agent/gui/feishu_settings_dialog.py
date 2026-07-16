@@ -248,7 +248,7 @@ class FeishuSettingsDialog(QDialog):
             QMessageBox.critical(
                 self,
                 "缺少依赖",
-                "未安装 requests 库，请在终端运行：\npip install requests",
+                "未安装 requests 库，请在项目目录运行：\nuv sync --locked",
             )
             return
 

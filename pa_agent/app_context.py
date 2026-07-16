@@ -216,7 +216,7 @@ def _compose_workspace_facade(*, settings: Any, settings_path: Any, pending_dir:
     runtime = PaperTradingRuntime(
         ledger=SQLiteExecutionLedger(EXECUTION_LEDGER_PATH),
         store=PaperStore(EXECUTION_LEDGER_PATH.with_name("paper_workspace.sqlite3")),
-        initial_balances=settings.trading.workspace.paper_balances,
+        initial_balances=settings.trading.workspace.paper_balances or {"USDT": "1000"},
     )
     baseline_limits = WorkspaceRiskLimits(
         maximum_order_notional="1000",

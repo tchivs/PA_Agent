@@ -70,7 +70,7 @@ def send_pushplus_raw(
     try:
         import requests  # type: ignore[import]
     except ImportError:
-        logger.warning("PushPlus：requests 库未安装，请运行 pip install requests")
+        logger.warning("PushPlus：requests 库未安装，请在项目目录运行 uv sync --locked")
         return False
 
     try:

@@ -1,7 +1,7 @@
 """MetaTrader 5 data source.
 
 Requires MetaTrader 5 terminal to be installed and running on Windows.
-Install the Python package: pip install MetaTrader5
+Install locked project dependencies with: uv sync --locked
 
 Usage:
     source = MT5Source()
@@ -65,7 +65,7 @@ class MT5Source(DataSource):
             import MetaTrader5 as mt5  # type: ignore[import]
         except ImportError as exc:
             raise DataSourceTransientError(
-                "MetaTrader5 package not installed — run: pip install MetaTrader5"
+                "MetaTrader5 package not installed — run: uv sync --locked"
             ) from exc
 
         if not mt5.initialize():

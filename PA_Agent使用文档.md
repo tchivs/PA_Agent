@@ -34,15 +34,14 @@
 ### 启动方式
 
 ```bash
-# 方式一：直接运行
-python run.py
+# 同步锁定依赖（首次运行会创建 .venv）
+uv sync --locked
 
-# 方式二：模块方式运行
-python -m pa_agent.main
+# 启动方式一：命令行入口
+uv run pa-agent
 
-# 方式三：安装后使用命令行入口
-pip install -e ".[dev]"
-pa-agent
+# 启动方式二：模块入口
+uv run python -m pa_agent.main
 ```
 
 ### 首次运行
@@ -676,8 +675,8 @@ experience/
 
 | 问题                                                | 解决方案                                        |
 | ------------------------------------------------- | ------------------------------------------- |
-| `ModuleNotFoundError: No module named 'pa_agent'` | 在项目根目录执行 `pip install -e ".[dev]"`          |
-| `No module named 'PyQt6'`                         | 执行 `pip install PyQt6`                      |
+| `ModuleNotFoundError: No module named 'pa_agent'` | 在项目根目录执行 `uv sync --locked`              |
+| `No module named 'PyQt6'`                         | 执行 `uv sync --locked` 并确认锁文件同步成功       |
 | `DLL load failed`                                 | 安装 Visual C++ 运行库                           |
 | MT5 未连接                                           | 确保 MT5 终端已打开并登录                             |
 

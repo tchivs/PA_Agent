@@ -132,7 +132,7 @@
 - **Not detected** — no deployment-platform configuration, Dockerfile, Compose manifest, container configuration, or hosting target is present at the repository root. [Direct evidence]
 
 **CI Pipeline:**
-- **GitHub Actions** — `.github/workflows/ci.yml` runs on `main` pushes and pull requests, uses `windows-latest` and Python 3.11, installs `.[dev]`, then verifies `import pa_agent`. [Direct evidence]
+- **GitHub Actions** — `.github/workflows/ci.yml` runs on `main` pushes and pull requests, uses `windows-latest`, pins uv 0.9.30 and Python 3.11, synchronizes `uv.lock`, then verifies `import pa_agent` through `uv run --frozen`. [Direct evidence]
 - **Deployment automation: None detected** — the workflow contains no publish, release, deployment, or environment-secrets step. [Direct evidence]
 
 ## Environment Configuration

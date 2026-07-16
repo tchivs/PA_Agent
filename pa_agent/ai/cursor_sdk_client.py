@@ -341,7 +341,7 @@ class CursorSdkClient:
             from cursor_sdk import Agent, AgentOptions, CursorClient, LocalAgentOptions  # type: ignore
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
-                "cursor-sdk 未安装或导入失败。请先安装依赖：pip install cursor-sdk"
+                "cursor-sdk 未安装或导入失败。请在项目目录执行：uv sync --locked"
             ) from exc
 
         prompt = _messages_to_prompt(messages)

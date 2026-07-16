@@ -64,7 +64,7 @@ class YFinanceSource(DataSource):
             logger.info("YFinanceSource connected (yfinance available)")
         except ImportError as exc:
             raise DataSourceTransientError(
-                "yfinance not installed — run: pip install yfinance"
+                "yfinance not installed — run: uv sync --locked"
             ) from exc
 
     def disconnect(self) -> None:

@@ -4,14 +4,12 @@
 
 ## 开发环境
 
-1. Windows 10/11，Python 3.11+
+1. Windows 10/11，安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)
 2. 安装 MetaTrader 5 并登录（用于真实 K 线联调）
 3. 克隆仓库后：
 
    ```cmd
-   python -m venv .venv
-   .venv\Scripts\activate
-   pip install -e ".[dev]"
+   uv sync --locked --dev
    copy config\settings.example.json config\settings.json
    ```
 
@@ -20,8 +18,8 @@
 ## 提交代码前
 
 ```cmd
-pytest -m "not e2e"
-ruff check pa_agent tests
+uv run --frozen pytest -m "not e2e"
+uv run --frozen ruff check pa_agent tests
 ```
 
 （若已安装 `black`，可按团队习惯格式化。）

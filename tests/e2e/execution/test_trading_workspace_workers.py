@@ -381,6 +381,30 @@ def test_real_app_context_composed_projection_uses_panel_request_identity(qtbot,
 
 
 @pytest.mark.e2e
+def test_real_app_context_bootstraps_legacy_empty_workspace_balances(monkeypatch, tmp_path):
+    """An older incomplete workspace config must not prevent the desktop app from starting."""
+    from pa_agent.app_context import _compose_workspace_facade
+    from pa_agent.config import paths
+    from pa_agent.config.settings import Settings
+
+    monkeypatch.setattr(paths, "EXECUTION_LEDGER_PATH", tmp_path / "execution.sqlite3")
+    settings = Settings.model_validate(
+        {"trading": {"workspace": {"paper_balances": {}}}}
+    )
+
+    facade, _runtime = _compose_workspace_facade(
+        settings=settings,
+        settings_path=tmp_path / "settings.json",
+        pending_dir=tmp_path / "pending",
+    )
+    try:
+        assert settings.trading.workspace.paper_balances == {}
+        assert facade.active_target_digest == "paper-spot-primary:paper-spot-primary:spot"
+    finally:
+        facade.close()
+
+
+@pytest.mark.e2e
 def test_eligible_record_ticket_review_confirmation_and_durable_reread_use_typed_worker_inputs(qtbot):
     """The panel sends only source/ticket IDs while the facade owns durable ticket facts."""
     from dataclasses import replace

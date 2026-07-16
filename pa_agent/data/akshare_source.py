@@ -261,7 +261,7 @@ class AkShareSource(DataSource):
             import akshare  # noqa: F401
         except ImportError as exc:
             raise DataSourceTransientError(
-                "未安装 akshare，请执行: pip install akshare"
+                "未安装 akshare，请在项目目录执行: uv sync --locked"
             ) from exc
         self._baostock_ok = False
         if os.environ.get("PA_AGENT_BAOSTOCK_FALLBACK", "").strip() in ("1", "true", "yes"):

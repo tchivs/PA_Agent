@@ -160,7 +160,7 @@ class TushareSource(DataSource):
         try:
             import tushare as ts
         except ImportError as exc:
-            raise DataSourceTransientError("未安装 tushare，请执行: pip install tushare") from exc
+            raise DataSourceTransientError("未安装 tushare，请执行: uv sync --locked") from exc
         ts.set_token(token)
         self._token = token
         self._connected = True

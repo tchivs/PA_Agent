@@ -122,7 +122,7 @@ class TradingViewSource(DataSource):
             self._connected = False
             raise DataSourceTransientError(
                 f"TradingView 连接失败：{exc}（若未安装请执行 "
-                "pip install git+https://github.com/rongardF/tvdatafeed.git）"
+                "uv sync --locked）"
             ) from exc
 
     def disconnect(self) -> None:

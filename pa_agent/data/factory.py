@@ -15,18 +15,19 @@ DataSourceKind = Literal[
     "tradingview",
     "akshare",
     "eastmoney",
+    "eastmoney_futures",
     "tushare",
     "yfinance",
 ]
 
-# UI-visible sources only — ``eastmoney`` is config/programmatic, not listed here.
+# UI-visible sources — 可在界面下拉框直接选择。
 DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
 )
 
 _HIDDEN_KINDS: frozenset[DataSourceKind] = frozenset(
-    {"akshare", "eastmoney", "tushare", "yfinance"}
+    {"akshare", "tushare", "yfinance", "eastmoney", "eastmoney_futures"}
 )
 
 _DEFAULT_SYMBOLS: dict[DataSourceKind, str] = {
@@ -34,6 +35,7 @@ _DEFAULT_SYMBOLS: dict[DataSourceKind, str] = {
     "tradingview": GOLD_TV_SYMBOL,
     "akshare": A_SHARE_DEFAULT_SYMBOL,
     "eastmoney": A_SHARE_DEFAULT_SYMBOL,
+    "eastmoney_futures": "RB0 螺纹钢",
     "tushare": A_SHARE_DEFAULT_SYMBOL,
     "yfinance": "GC=F",
 }
@@ -60,6 +62,8 @@ def data_source_label(kind: str | None) -> str:
             return label
     if normalized == "eastmoney":
         return "东方财富"
+    if normalized == "eastmoney_futures":
+        return "东方财富期货"
     if normalized == "tushare":
         return "Tushare(A股)"
     if normalized == "akshare":
@@ -84,6 +88,10 @@ def create_data_source(kind: str | None) -> DataSource:
         from pa_agent.data.eastmoney_source import EastMoneySource
 
         return EastMoneySource()
+    if normalized == "eastmoney_futures":
+        from pa_agent.data.eastmoney_futures_source import EastMoneyFuturesSource
+
+        return EastMoneyFuturesSource()
     if normalized == "tushare":
         from pa_agent.config.paths import SETTINGS_JSON_PATH
         from pa_agent.config.settings import load_settings

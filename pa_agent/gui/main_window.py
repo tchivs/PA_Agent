@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal, QObject
@@ -346,6 +347,10 @@ class MainWindow(QMainWindow):
 
         # ── Menu bar ─── 顶层直接触发按钮 + 演示模式下拉 ────────────────────
         menu_bar: QMenuBar = self.menuBar()  # type: ignore[assignment]
+        # macOS 原生菜单栏只认 QMenu 下拉菜单，不认顶层 QAction，
+        # 强制禁用原生菜单栏以保持跨平台一致的按钮式菜单栏体验。
+        if sys.platform == "darwin":
+            menu_bar.setNativeMenuBar(False)
 
         # 1. AI 模型设置 — 点击直接弹对话框（无下拉）
         _ai_model_action = QAction("AI 模型设置", self)
